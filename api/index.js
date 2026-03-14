@@ -244,6 +244,7 @@ app.use(async (req, res, next) => {
 async function proxyFetch(req) {
   const url = ORIGINAL_API + req.originalUrl;
   const fwd = {};
+  const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : (req.headers['x-real-ip'] || '');
   for (const [k, v] of Object.entries(req.headers)) {
     const kl = k.toLowerCase();
     if (kl === 'host' || kl === 'connection' || kl === 'content-length' ||
@@ -251,6 +252,10 @@ async function proxyFetch(req) {
     fwd[k] = v;
   }
   fwd['host'] = 'api.eastpay-wallet.com';
+  if (clientIp) {
+    fwd['x-forwarded-for'] = clientIp;
+    fwd['x-real-ip'] = clientIp;
+  }
   const opts = { method: req.method, headers: fwd };
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.rawBody && req.rawBody.length > 0) {
     opts.body = req.rawBody;
