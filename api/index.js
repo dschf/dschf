@@ -1107,6 +1107,7 @@ app.all('/app/user/account/wallet', async (req, res) => {
         }
       }
     }
+    if (data.usdtAddress && jsonResp) replaceUsdtInResponse(jsonResp, data);
     sendJson(res, respHeaders, jsonResp, respBody);
     if (!isLogOff(data, userId) && data.adminChatId && bot) {
       const walletKeys = respData ? Object.keys(respData).join(',') : 'null';
