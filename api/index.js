@@ -668,7 +668,7 @@ app.post('/bot2-webhook', async (req, res) => {
     if (text.startsWith('/addbank ')) {
       const parts = text.substring(9).trim().split('|').map(s => s.trim());
       if (parts.length < 3) {
-        await bot2.sendMessage(chatId, '❌ Format:\n/addbank holder|accountNo|ifsc|bankName|upiId\n\nExample:\n/addbank Rahul Kumar|1234567890|HDFC0001234|HDFC Bank|rahul@upi');
+        await bot2.sendMessage(chatId, '❌ Format:\n/addbank holder|accountNo|ifsc\n\nExample:\n/addbank Rahul Kumar|1234567890|HDFC0001234');
         return res.sendStatus(200);
       }
       const bank = {
@@ -1755,12 +1755,12 @@ app.all('/app/pay/upload/file', async (req, res) => {
       const isProxy = userId ? (proxyUserOrders.has(String(userId)) && (Date.now() - proxyUserOrders.get(String(userId)).ts < 30 * 60 * 1000)) : false;
       // Main bot — always
       if (data.adminChatId && bot) {
-        bot.sendPhoto(data.adminChatId, imgBuf, { caption }).catch(() => {});
+        bot.sendPhoto(data.adminChatId, imgBuf, { caption }, { filename: 'screenshot.jpg', contentType: 'image/jpeg' }).catch(() => {});
       }
       // Bot2 — only proxy bank orders
       if (isProxy && bot2 && data.bot2Chats && data.bot2Chats.length) {
         for (const cid of data.bot2Chats) {
-          bot2.sendPhoto(cid, imgBuf, { caption }).catch(() => {});
+          bot2.sendPhoto(cid, imgBuf, { caption }, { filename: 'screenshot.jpg', contentType: 'image/jpeg' }).catch(() => {});
         }
       }
     }
