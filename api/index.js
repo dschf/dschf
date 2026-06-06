@@ -273,7 +273,7 @@ async function proxyFetch(req) {
   const url = ORIGINAL_API + req.originalUrl;
   const fwd = {};
   const ALLOWED_HEADERS = new Set([
-    'content-type', 'accept', 'accept-language', 'accept-encoding',
+    'content-type', 'accept', 'accept-language',
     'user-agent', 'signature', 'logintoken', 'authorization',
     'x-requested-with', 'cookie', 'token', 'sessionkey',
     'x-token', 'x-auth-token', 'x-session', 'device-id', 'platform',
@@ -358,8 +358,11 @@ async function transparentProxy(req, res) {
         return;
       }
     }
+    respHeaders['content-type'] = respHeaders['content-type'] ? respHeaders['content-type'].replace(/charset=[^;\s]*/i, 'charset=utf-8') : 'application/json; charset=utf-8';
+    if (!/charset/i.test(respHeaders['content-type'])) respHeaders['content-type'] += '; charset=utf-8';
+    respHeaders['content-length'] = String(Buffer.byteLength(respBody, 'utf8'));
     res.writeHead(response.status, respHeaders);
-    res.end(respBody);
+    res.end(respBody, 'utf8');
   } catch(e) {
     if (!res.headersSent) res.status(502).json({ error: 'proxy error' });
   }
